@@ -1,11 +1,12 @@
 name: Collin County Lead Scraper
 
-on:env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+on:
   schedule:
-    # 7:00 AM UTC daily  (2:00 AM CDT / 1:00 AM CST)
     - cron: "0 7 * * *"
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: write
@@ -18,13 +19,11 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
-      # ── Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ── Python setup ──────────────────────────────────────────────────────
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -35,15 +34,12 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scraper/requirements.txt
 
-      # ── Playwright ────────────────────────────────────────────────────────
       - name: Install Playwright browsers
         run: python -m playwright install --with-deps chromium
 
-      # ── Scrape ────────────────────────────────────────────────────────────
       - name: Run scraper
         run: python scraper/fetch.py
 
-      # ── Commit results ────────────────────────────────────────────────────
       - name: Commit updated records
         run: |
           git config user.name  "github-actions[bot]"
@@ -53,7 +49,6 @@ jobs:
             git commit -m "chore: update records $(date -u '+%Y-%m-%d %H:%M UTC')"
           git push
 
-      # ── Deploy dashboard to GitHub Pages ──────────────────────────────────
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
