@@ -1,0 +1,72 @@
+name: Collin County Lead Scraper
+
+on:
+  schedule:
+    # 7:00 AM UTC daily  (2:00 AM CDT / 1:00 AM CST)
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scrape:
+    name: Scrape & Publish
+    runs-on: ubuntu-22.04
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # ── Python setup ──────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: scraper/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scraper/requirements.txt
+
+      # ── Playwright ────────────────────────────────────────────────────────
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      # ── Scrape ────────────────────────────────────────────────────────────
+      - name: Run scraper
+        run: python scraper/fetch.py
+
+      # ── Commit results ────────────────────────────────────────────────────
+      - name: Commit updated records
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard/records.json data/records.json data/ghl_export.csv || true
+          git diff --cached --quiet || \
+            git commit -m "chore: update records $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
+
+      # ── Deploy dashboard to GitHub Pages ──────────────────────────────────
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+  deploy-pages:
+    name: Deploy to GitHub Pages
+    needs: scrape
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
