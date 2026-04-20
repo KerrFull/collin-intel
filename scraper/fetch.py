@@ -4,6 +4,9 @@ Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/   (Neumo SPA)
 Parcel data  : https://collincad.org/open-data-portal/
 Look-back    : last 7 days
+
+DEBUG MODE: saves screenshots to debug/ folder so you can see what
+Playwright actually renders. Check the GitHub Actions artifact after running.
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ CAD_PORTAL    = "https://collincad.org/open-data-portal/"
 LOOKBACK_DAYS = 7
 RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
+DEBUG          = True   # set False to skip screenshots
 
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
@@ -65,8 +69,10 @@ DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
 ROOT          = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 DATA_DIR      = ROOT / "data"
+DEBUG_DIR     = ROOT / "debug"
 DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+DEBUG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -123,6 +129,28 @@ def _normalise_date(raw: str) -> str:
     if m:
         return f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
     return raw
+
+
+async def screenshot(page: Page, name: str) -> None:
+    if not DEBUG:
+        return
+    path = DEBUG_DIR / f"{name}.png"
+    try:
+        await page.screenshot(path=str(path), full_page=True)
+        log.info("  📸 Screenshot → %s", path)
+    except Exception as exc:
+        log.warning("  Screenshot failed: %s", exc)
+
+
+async def save_html(page: Page, name: str) -> None:
+    if not DEBUG:
+        return
+    path = DEBUG_DIR / f"{name}.html"
+    try:
+        path.write_text(await page.content(), encoding="utf-8")
+        log.info("  📄 HTML saved → %s", path)
+    except Exception as exc:
+        log.warning("  HTML save failed: %s", exc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -219,13 +247,7 @@ def lookup_parcel(owner: str, parcel_lookup: dict) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLERK PORTAL — Neumo SPA
-#
-#  URL pattern (observed from portal source):
-#  /results?searchType=quickSearch&department=RP&searchOcrText=false
-#           &searchTerm=<DOCTYPE>
-#           &recordedDateRange=custom
-#           &recordedDateFrom=MM%2FDD%2FYYYY&recordedDateTo=MM%2FDD%2FYYYY
+#  CLERK PORTAL — Neumo SPA  (stealth Playwright)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
@@ -261,8 +283,7 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
         def g(*keys) -> str:
             for k in keys:
                 v = src.get(k)
-                if v:
-                    return safe_str(v)
+                if v: return safe_str(v)
             return ""
 
         doc_num  = g("instrumentNumber","docNumber","instrument_number","doc_number","InstrumentNumber")
@@ -277,14 +298,10 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
 
         if doc_num or owner:
             records.append({
-                "doc_num":   doc_num,
-                "doc_type":  dtype,
-                "filed":     _normalise_date(filed),
-                "owner":     owner,
-                "grantee":   grantee,
-                "legal":     legal,
-                "amount":    amount,
-                "clerk_url": clerk_url,
+                "doc_num": doc_num, "doc_type": dtype,
+                "filed": _normalise_date(filed), "owner": owner,
+                "grantee": grantee, "legal": legal,
+                "amount": amount, "clerk_url": clerk_url,
             })
     return records
 
@@ -307,7 +324,7 @@ def _text_to_row(text: str) -> dict[str, str]:
 def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
     def g(*keys) -> str:
         for k in keys:
-            v = row.get(k, "") or row.get(k.lower(), "") or row.get(k.upper(), "")
+            v = row.get(k,"") or row.get(k.lower(),"") or row.get(k.upper(),"")
             if v: return safe_str(v)
         return ""
     return {
@@ -337,47 +354,43 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
         for tr in table.find_all("tr")[1:]:
             cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
             if not cells: continue
-            row  = dict(zip(headers, cells))
             link = tr.find("a", href=True)
             href = _abs(link["href"]) if link else ""
-            records.append(_row_to_record(row, href, doc_type))
+            records.append(_row_to_record(dict(zip(headers, cells)), href, doc_type))
         if records:
             return records
 
-    # Card layout
-    card_selectors = [
+    # Card layout — try many selector patterns
+    for sel in [
         "[data-testid='result-item']", "[class*='record-card']",
         "[class*='result-item']",      "[class*='result-card']",
         "[class*='search-result']",    "li[class*='result']",
         "div[class*='ResultItem']",    "div[class*='RecordItem']",
-    ]
-    cards = []
-    for sel in card_selectors:
-        found = soup.select(sel)
-        if found:
-            cards = found
-            break
-
-    for card in cards:
-        link = card.find("a", href=True)
-        href = _abs(link["href"]) if link else ""
-        text = card.get_text(" ", strip=True)
-        row  = _text_to_row(text)
-        rec  = _row_to_record(row, href, doc_type)
-        if not rec["doc_num"] and href:
-            m = re.search(r"/doc/([^/?#]+)", href)
-            if m: rec["doc_num"] = m.group(1)
-        if rec["doc_num"] or rec["owner"]:
-            records.append(rec)
+        "div[class*='Hit']",           "article",
+    ]:
+        cards = soup.select(sel)
+        if cards:
+            for card in cards:
+                link = card.find("a", href=True)
+                href = _abs(link["href"]) if link else ""
+                row  = _text_to_row(card.get_text(" ", strip=True))
+                rec  = _row_to_record(row, href, doc_type)
+                if not rec["doc_num"] and href:
+                    m = re.search(r"/doc/([^/?#]+)", href)
+                    if m: rec["doc_num"] = m.group(1)
+                if rec["doc_num"] or rec["owner"]:
+                    records.append(rec)
+            if records:
+                return records
 
     return records
 
 
 async def _click_next(page: Page) -> bool:
-    """Click Next page button. Returns True if clicked, False if not found/disabled."""
     next_btn = page.locator(
         "button:has-text('Next'), [aria-label='Next page'], "
-        "[data-testid='next-page'], button[class*='next' i]"
+        "[data-testid='next-page'], button[class*='next' i], "
+        "a:has-text('Next')"
     ).first
     if await next_btn.count() == 0:
         return False
@@ -386,7 +399,7 @@ async def _click_next(page: Page) -> bool:
     if disabled is not None or "disabled" in cls:
         return False
     await next_btn.click()
-    await asyncio.sleep(2)
+    await asyncio.sleep(2.5)
     return True
 
 
@@ -402,10 +415,12 @@ async def scrape_doc_type(
 
     async def handle_response(response):
         url = response.url
-        if "/api/" in url and ("search" in url.lower() or "result" in url.lower()):
+        ct  = response.headers.get("content-type", "")
+        if "json" in ct and any(x in url for x in ["/api/", "/search", "/result", "/record"]):
             try:
                 body = await response.json()
                 api_responses.append(body)
+                log.debug("  [API] intercepted %s", url)
             except Exception:
                 pass
 
@@ -413,23 +428,46 @@ async def scrape_doc_type(
 
     try:
         url = build_search_url(doc_type, date_from, date_to)
-        log.info("  Fetching: %s", url)
+        log.info("  Loading: %s", url)
 
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                await page.goto(url, timeout=45_000, wait_until="networkidle")
+                await page.goto(url, timeout=60_000, wait_until="networkidle")
                 break
             except Exception as exc:
                 if attempt == RETRY_ATTEMPTS: raise
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
 
-        await asyncio.sleep(3)
+        # Wait for React to render
+        await asyncio.sleep(4)
 
-        # Strategy 1: intercepted API JSON
+        # Save debug snapshot for first doc type only
+        if doc_type == "LP":
+            await screenshot(page, f"search_{doc_type}")
+            await save_html(page, f"search_{doc_type}")
+
+        # Log what we got
+        title = await page.title()
+        log.info("  Page title: %s", title)
+        log.info("  API responses intercepted: %d", len(api_responses))
+
+        # Strategy 1: API JSON
         if api_responses:
             for body in api_responses:
-                records.extend(_extract_from_api(body, doc_type))
+                extracted = _extract_from_api(body, doc_type)
+                records.extend(extracted)
+                if extracted:
+                    log.info("  [API] extracted %d records from response", len(extracted))
+
+            # Log the raw API shape for debugging
+            if DEBUG and api_responses:
+                debug_path = DEBUG_DIR / f"api_{doc_type}.json"
+                debug_path.write_text(
+                    json.dumps(api_responses[0], indent=2, default=str)[:50000],
+                    encoding="utf-8"
+                )
+
             if records:
                 for _ in range(20):
                     api_responses.clear()
@@ -437,7 +475,7 @@ async def scrape_doc_type(
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
 
-        # Strategy 2: parse rendered HTML
+        # Strategy 2: HTML parsing
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
@@ -446,10 +484,115 @@ async def scrape_doc_type(
                 if not new: break
                 records.extend(new)
 
-        log.info("  %d records for %s", len(records), doc_type)
+        # Strategy 3: Try the advanced search form directly
+        if not records:
+            records = await _try_advanced_search(context, doc_type, date_from, date_to)
+
+        log.info("  → %d records for %s", len(records), doc_type)
 
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
+        if DEBUG:
+            await screenshot(page, f"error_{doc_type}")
+    finally:
+        await page.close()
+
+    return records
+
+
+async def _try_advanced_search(
+    context: BrowserContext,
+    doc_type: str,
+    date_from: str,
+    date_to: str,
+) -> list[dict]:
+    """
+    Fallback: navigate to /search/advanced, fill the form interactively,
+    and parse results.
+    """
+    records: list[dict] = []
+    page: Page = await context.new_page()
+    api_responses: list[dict] = []
+
+    async def handle_response(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct:
+            try:
+                api_responses.append(await response.json())
+            except Exception:
+                pass
+
+    page.on("response", handle_response)
+
+    try:
+        log.info("  Trying advanced search for %s", doc_type)
+        await page.goto(f"{CLERK_BASE}/search/advanced", timeout=45_000,
+                        wait_until="networkidle")
+        await asyncio.sleep(3)
+
+        if doc_type == "LP":
+            await screenshot(page, "advanced_search_form")
+
+        # Fill document type
+        for sel in [
+            "input[placeholder*='Document Type' i]",
+            "input[name*='docType' i]",
+            "input[id*='docType' i]",
+            "[data-testid*='docType' i]",
+        ]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.click()
+                await el.fill(doc_type)
+                await asyncio.sleep(0.5)
+                # Pick from dropdown
+                drop = page.locator(
+                    f"[role='option']:has-text('{doc_type}'), "
+                    f"li:has-text('{doc_type}')"
+                ).first
+                if await drop.count() > 0:
+                    await drop.click()
+                break
+
+        # Date from
+        for sel in ["input[placeholder*='Start' i]", "input[name*='start' i]",
+                    "input[id*='start' i]", "input[placeholder*='From' i]"]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.fill(date_from)
+                break
+
+        # Date to
+        for sel in ["input[placeholder*='End' i]", "input[name*='end' i]",
+                    "input[id*='end' i]", "input[placeholder*='To' i]"]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.fill(date_to)
+                break
+
+        # Submit
+        for sel in ["button[type='submit']", "button:has-text('Search')",
+                    "input[type='submit']"]:
+            btn = page.locator(sel).first
+            if await btn.count() > 0:
+                await btn.click()
+                break
+
+        await asyncio.sleep(4)
+
+        if doc_type == "LP":
+            await screenshot(page, "advanced_search_results")
+
+        # Parse API responses
+        for body in api_responses:
+            records.extend(_extract_from_api(body, doc_type))
+
+        # Parse HTML fallback
+        if not records:
+            records = await _parse_neumo_html(page, doc_type)
+
+    except Exception as exc:
+        log.warning("  Advanced search failed for %s: %s", doc_type, exc)
     finally:
         await page.close()
 
@@ -460,11 +603,18 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
 
     async with async_playwright() as pw:
+        # Use stealth-like settings to avoid bot detection
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox","--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1280,900",
+            ],
         )
+
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
@@ -472,13 +622,29 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                 "Chrome/123.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1280, "height": 900},
+            # Spoof common browser properties
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            },
         )
 
-        # Warm-up: establish session cookies
+        # Remove webdriver flag that Playwright sets (bot detection bypass)
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            window.chrome = {runtime: {}};
+        """)
+
+        # Warm-up visit
+        log.info("Warming up session on home page…")
         warmup = await context.new_page()
         try:
             await warmup.goto(CLERK_BASE, timeout=30_000, wait_until="networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(3)
+            await screenshot(warmup, "homepage")
+            log.info("  Homepage title: %s", await warmup.title())
         except Exception as exc:
             log.warning("Warmup non-fatal: %s", exc)
         finally:
@@ -665,6 +831,7 @@ async def main() -> None:
     log.info("Range: %s → %s", date_from, date_to)
     log.info("═" * 60)
 
+    # Parcel lookup
     parcel_lookup: dict = {}
     try:
         raw = with_retry(download_parcel_dbf)
@@ -673,9 +840,11 @@ async def main() -> None:
     except Exception as exc:
         log.error("Parcel data unavailable: %s", exc)
 
+    # Clerk scrape
     raw_records = await run_clerk_scrape(date_from, date_to)
     log.info("Raw records from clerk: %d", len(raw_records))
 
+    # Assemble & save
     records = assemble_records(raw_records, parcel_lookup, today)
     save_output(records, date_from, date_to)
     export_ghl_csv(records)
@@ -686,4 +855,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
