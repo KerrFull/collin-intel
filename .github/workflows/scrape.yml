@@ -40,6 +40,14 @@ jobs:
       - name: Run scraper
         run: python scraper/fetch.py
 
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: debug/
+          retention-days: 7
+
       - name: Commit updated records
         run: |
           git config user.name  "github-actions[bot]"
