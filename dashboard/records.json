@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-04-21T17:07:31.236483+00:00",
+  "fetched_at": "2026-04-21T17:24:48.342262+00:00",
   "source": "Collin County Clerk / Collin CAD",
   "date_range": {
     "from": "4/14/2026",
@@ -12,8 +12,8 @@
       "doc_num": "2497",
       "doc_type": "VOID",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "N/A",
       "grantee": "N/A",
       "amount": "",
@@ -28,17 +28,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "5997",
       "doc_type": "VOID",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "N/A",
       "grantee": "N/A",
       "amount": "",
@@ -53,17 +52,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "18930115800430925",
       "doc_type": "FINANCING STATEMENTS PERSONAL PROPERTY",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "GLENWOOD ESTATES LIMITED PARTNERSHI",
       "grantee": "FIRST AMERICAN SAVINGS",
       "amount": "",
@@ -78,17 +76,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "18980826801277884",
       "doc_type": "FINANCING STATEMENTS PERSONAL PROPERTY",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BEAKLEY JOHN",
       "grantee": "ITT FINANCIAL SERVICES",
       "amount": "",
@@ -103,17 +100,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "18980826801278884",
       "doc_type": "FINANCING STATEMENTS PERSONAL PROPERTY",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "CATO HAROLD D",
       "grantee": "AMERICAN FEDERAL S & L",
       "amount": "",
@@ -128,17 +124,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "18980826801280884",
       "doc_type": "FINANCING STATEMENTS PERSONAL PROPERTY",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "HUXHAM PAUL T",
       "grantee": "FIRST CITY BK LEWISVIL",
       "amount": "",
@@ -153,17 +148,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100309",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "FORSHEE LELA JANE",
       "grantee": "N/A",
       "amount": "",
@@ -178,17 +172,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100334",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "PETWAY L R",
       "grantee": "N/A",
       "amount": "",
@@ -203,17 +196,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100328",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MERRITT JOE MRS",
       "grantee": "N/A",
       "amount": "",
@@ -228,17 +220,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100346",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WALL MYLDRED",
       "grantee": "N/A",
       "amount": "",
@@ -253,17 +244,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100342",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "POWELL RAYMOND",
       "grantee": "N/A",
       "amount": "",
@@ -278,17 +268,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100341",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WHARTON A L",
       "grantee": "N/A",
       "amount": "",
@@ -303,17 +292,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100351",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MCFARLAND ROBBI",
       "grantee": "N/A",
       "amount": "",
@@ -328,17 +316,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100338",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "JOHNSON J T",
       "grantee": "N/A",
       "amount": "",
@@ -353,17 +340,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100343",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MILLER W B",
       "grantee": "N/A",
       "amount": "",
@@ -378,17 +364,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100356",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "POTEET BILL",
       "grantee": "N/A",
       "amount": "",
@@ -403,17 +388,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100358",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "HANNA LESLIE L",
       "grantee": "N/A",
       "amount": "",
@@ -428,17 +412,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100443",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "PHILLIPS VOLNEY D",
       "grantee": "N/A",
       "amount": "",
@@ -453,17 +436,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100495",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "GRIFFIN ROBERT J",
       "grantee": "N/A",
       "amount": "",
@@ -478,17 +460,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100510",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BARKER W W MRS",
       "grantee": "N/A",
       "amount": "",
@@ -503,17 +484,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100538",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "TEDFORD R A",
       "grantee": "N/A",
       "amount": "",
@@ -528,17 +508,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100532",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BROWN HOMER C",
       "grantee": "N/A",
       "amount": "",
@@ -553,17 +532,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100539",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "FURR G C",
       "grantee": "N/A",
       "amount": "",
@@ -578,17 +556,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100567",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WASSON HAROLD H",
       "grantee": "N/A",
       "amount": "",
@@ -603,17 +580,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100579",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "RYAN TOM",
       "grantee": "N/A",
       "amount": "",
@@ -628,17 +604,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100603",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BLANK ONUS",
       "grantee": "N/A",
       "amount": "",
@@ -653,17 +628,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100549",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WRIGHT GLENDA",
       "grantee": "N/A",
       "amount": "",
@@ -678,17 +652,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100604",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "RENFRO B R",
       "grantee": "N/A",
       "amount": "",
@@ -703,17 +676,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100610",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "O CONNELL TOM S",
       "grantee": "N/A",
       "amount": "",
@@ -728,17 +700,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100661",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "DODSON DAVID",
       "grantee": "N/A",
       "amount": "",
@@ -753,17 +724,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100663",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SEBASTION W S JR",
       "grantee": "N/A",
       "amount": "",
@@ -778,17 +748,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100697",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MCVEIGH JOHN K",
       "grantee": "N/A",
       "amount": "",
@@ -803,17 +772,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100700",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "JOHNSON MOZELLE",
       "grantee": "N/A",
       "amount": "",
@@ -828,17 +796,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111110467",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MCCARLEY HUGH E",
       "grantee": "N/A",
       "amount": "",
@@ -853,17 +820,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111110469",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "CLARK ROBERT S",
       "grantee": "N/A",
       "amount": "",
@@ -878,17 +844,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111200080",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SMITH GEORGE W",
       "grantee": "N/A",
       "amount": "",
@@ -903,17 +868,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100001",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SMITH FAY",
       "grantee": "N/A",
       "amount": "",
@@ -928,17 +892,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100049",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BENTLEY GENE G",
       "grantee": "N/A",
       "amount": "",
@@ -953,17 +916,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100092",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "EATON H M",
       "grantee": "N/A",
       "amount": "",
@@ -978,17 +940,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100129",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "HAMILTON R E",
       "grantee": "N/A",
       "amount": "",
@@ -1003,17 +964,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100145",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SIMS ARTHUR",
       "grantee": "N/A",
       "amount": "",
@@ -1028,17 +988,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100141",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "NEWELL ROSCOE",
       "grantee": "N/A",
       "amount": "",
@@ -1053,17 +1012,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100172",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SISTERSON FLORA",
       "grantee": "N/A",
       "amount": "",
@@ -1078,17 +1036,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100182",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "MARION CARL",
       "grantee": "N/A",
       "amount": "",
@@ -1103,17 +1060,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100232",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "SIMS ARTHUR",
       "grantee": "N/A",
       "amount": "",
@@ -1128,17 +1084,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100228",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "GARNER W E",
       "grantee": "N/A",
       "amount": "",
@@ -1153,17 +1108,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100231",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "BOYD BILL",
       "grantee": "N/A",
       "amount": "",
@@ -1178,17 +1132,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100244",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "HOUSEWRIGHT LARRY",
       "grantee": "N/A",
       "amount": "",
@@ -1203,17 +1156,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100241",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WHARTON A L",
       "grantee": "N/A",
       "amount": "",
@@ -1228,17 +1180,16 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     },
     {
       "doc_num": "19000101111100256",
       "doc_type": "OFFICIAL BONDS",
       "filed": "",
-      "cat": "LP",
-      "cat_label": "Lis Pendens",
+      "cat": "RELLP",
+      "cat_label": "Release Lis Pendens",
       "owner": "WRIGHT EUVA",
       "grantee": "N/A",
       "amount": "",
@@ -1253,10 +1204,9 @@
       "mail_zip": "",
       "clerk_url": "",
       "flags": [
-        "Lis pendens",
-        "Pre-foreclosure"
+        "Lis pendens"
       ],
-      "score": 70
+      "score": 40
     }
   ]
 }
