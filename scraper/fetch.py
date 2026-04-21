@@ -2,10 +2,10 @@
 """
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
-Parcel data  : Texas Open Data Portal (Socrata) — Collin CAD Owner Prop List
-               https://data.texas.gov/resource/ahis-pci3.json
-               Fallback: Collin CAD Appraisal Data Preliminary
-               https://data.texas.gov/resource/nne4-8riu.json
+Parcel data  : ArcGIS MapServer (CCAD Tax Parcels) — public, no auth
+               https://gismaps.cityofallen.org/arcgis/rest/services/
+               ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1
+               Fallback: Texas Open Data Socrata (ahis-pci3 / nne4-8riu)
 Look-back    : last 7 days
 """
 
@@ -15,19 +15,18 @@ import asyncio
 import csv
 import json
 import logging
-import os
 import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Page, BrowserContext
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -35,16 +34,24 @@ logging.basicConfig(
 )
 log = logging.getLogger("collin_scraper")
 
-# ─── Constants ────────────────────────────────────────────────────────────────
 CLERK_BASE     = "https://collin.tx.publicsearch.us"
 LOOKBACK_DAYS  = 7
 RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
 DEBUG          = True
 
-# Texas Open Data Portal Socrata endpoints
-SOCRATA_OWNER = "https://data.texas.gov/resource/ahis-pci3.json"
-SOCRATA_APPR  = "https://data.texas.gov/resource/nne4-8riu.json"
+ARCGIS_URL = (
+    "https://gismaps.cityofallen.org/arcgis/rest/services/"
+    "ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1/query"
+)
+ARCGIS_FIELDS = (
+    "file_as_name,addr_line1,addr_city,addr_state,addr_zip,"
+    "situs_num,situs_street,situs_city"
+)
+
+SOCRATA_OWNER      = "https://data.texas.gov/resource/ahis-pci3.json"
+SOCRATA_APPR       = "https://data.texas.gov/resource/nne4-8riu.json"
+SOCRATA_OWNER_COLS = ["file_as_name", "owner_name", "ownername"]
 
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
@@ -80,14 +87,12 @@ for _d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
 def safe_str(val: Any) -> str:
     return str(val).strip() if val is not None else ""
 
-
 def parse_amount(raw: str) -> float | None:
     cleaned = re.sub(r"[^\d.]", "", raw)
     try:
         return float(cleaned) if cleaned else None
     except ValueError:
         return None
-
 
 def name_variants(full_name: str) -> list[str]:
     full_name = full_name.strip().upper()
@@ -98,12 +103,10 @@ def name_variants(full_name: str) -> list[str]:
         variants.add(f"{parts[-1]}, {' '.join(parts[:-1])}")
     return [v for v in variants if v]
 
-
-def _abs(href: str) -> str:
+def _abs_url(href: str) -> str:
     if not href:
         return ""
     return href if href.startswith("http") else f"{CLERK_BASE}{href}"
-
 
 def _normalise_date(raw: str) -> str:
     if not raw:
@@ -115,7 +118,6 @@ def _normalise_date(raw: str) -> str:
         return f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
     return raw
 
-
 async def screenshot(page: Page, name: str) -> None:
     if not DEBUG:
         return
@@ -125,85 +127,106 @@ async def screenshot(page: Page, name: str) -> None:
     except Exception as exc:
         log.warning("  screenshot failed: %s", exc)
 
-
 async def save_html(page: Page, name: str) -> None:
     if not DEBUG:
         return
     try:
-        (DEBUG_DIR / f"{name}.html").write_text(await page.content(), encoding="utf-8")
-        log.info("  html saved: %s.html", name)
-    except Exception as exc:
-        log.warning("  html save failed: %s", exc)
+        (DEBUG_DIR / f"{name}.html").write_text(
+            await page.content(), encoding="utf-8")
+    except Exception:
+        pass
 
 
 # ==============================================================================
-#  PARCEL LOOKUP via Texas Open Data Portal (Socrata — live per-owner query)
+#  PARCEL LOOKUP
 # ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
 
-_OWNER_COLS   = ["owner_name", "ownername", "owner", "own1", "own_name"]
-_SADDR_COLS   = ["situs_address", "site_address", "prop_address", "situs_addr",
-                 "site_addr", "location_address", "address"]
-_SNUM_COLS    = ["situs_num", "site_num", "situs_street_num"]
-_SSTR_COLS    = ["situs_street", "site_street", "situs_str", "street_name"]
-_SCITY_COLS   = ["situs_city", "site_city", "prop_city", "city_name", "city"]
-_SSTATE_COLS  = ["situs_state", "site_state", "state"]
-_SZIP_COLS    = ["situs_zip", "site_zip", "zip_code", "zip"]
-_MADDR_COLS   = ["mail_addr", "mailing_address", "mail_address", "addr_line1",
-                 "mail_addr1", "mailing_addr"]
-_MCITY_COLS   = ["mail_city", "mailing_city"]
-_MSTATE_COLS  = ["mail_state", "mailing_state"]
-_MZIP_COLS    = ["mail_zip", "mailing_zip", "mail_zipcode"]
-
-
-def _first(row: dict, *cols) -> str:
+def _first_val(row: dict, *cols) -> str:
     for c in cols:
         v = row.get(c, "")
         if v:
             return safe_str(v)
     return ""
 
-
-def _row_to_parcel(row: dict) -> dict:
-    saddr = _first(row, *_SADDR_COLS)
-    if not saddr:
-        snum    = _first(row, *_SNUM_COLS)
-        sstreet = _first(row, *_SSTR_COLS)
-        saddr   = f"{snum} {sstreet}".strip() if (snum or sstreet) else ""
-    return {
-        "prop_address": saddr,
-        "prop_city":    _first(row, *_SCITY_COLS),
-        "prop_state":   _first(row, *_SSTATE_COLS) or "TX",
-        "prop_zip":     _first(row, *_SZIP_COLS),
-        "mail_address": _first(row, *_MADDR_COLS),
-        "mail_city":    _first(row, *_MCITY_COLS),
-        "mail_state":   _first(row, *_MSTATE_COLS) or "TX",
-        "mail_zip":     _first(row, *_MZIP_COLS),
-    }
-
-
-def _socrata_query(endpoint: str, owner_variant: str) -> list[dict]:
+def _arcgis_lookup(owner_variant: str) -> dict:
     safe_name = owner_variant.replace("'", "''")
-    for col in _OWNER_COLS:
-        try:
-            resp = requests.get(
-                endpoint,
-                params={
-                    "$where": f"upper({col}) = '{safe_name}'",
-                    "$limit": 1,
-                },
-                timeout=8,
-                headers={"Accept": "application/json"},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    return data
-        except Exception:
-            pass
-    return []
+    try:
+        resp = requests.get(
+            ARCGIS_URL,
+            params={
+                "where": f"upper(file_as_name) = '{safe_name}'",
+                "outFields": ARCGIS_FIELDS,
+                "returnGeometry": "false",
+                "resultRecordCount": 1,
+                "f": "json",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return {}
+        data = resp.json()
+        features = data.get("features", [])
+        if not features:
+            return {}
+        attrs = features[0].get("attributes", {})
+        situs_num    = safe_str(attrs.get("situs_num", ""))
+        situs_street = safe_str(attrs.get("situs_street", ""))
+        prop_address = f"{situs_num} {situs_street}".strip()
+        return {
+            "prop_address": prop_address,
+            "prop_city":    safe_str(attrs.get("situs_city", "")),
+            "prop_state":   "TX",
+            "prop_zip":     "",
+            "mail_address": safe_str(attrs.get("addr_line1", "")),
+            "mail_city":    safe_str(attrs.get("addr_city", "")),
+            "mail_state":   safe_str(attrs.get("addr_state", "")) or "TX",
+            "mail_zip":     safe_str(attrs.get("addr_zip", "")),
+        }
+    except Exception as exc:
+        log.debug("ArcGIS lookup failed for %r: %s", owner_variant, exc)
+        return {}
 
+def _socrata_lookup(owner_variant: str) -> dict:
+    safe_name = owner_variant.replace("'", "''")
+    for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
+        for col in SOCRATA_OWNER_COLS:
+            try:
+                resp = requests.get(
+                    endpoint,
+                    params={
+                        "$where": f"upper({col}) = '{safe_name}'",
+                        "$limit": 1,
+                    },
+                    timeout=8,
+                    headers={"Accept": "application/json"},
+                )
+                if resp.status_code != 200:
+                    continue
+                rows = resp.json()
+                if not (isinstance(rows, list) and rows):
+                    continue
+                r = rows[0]
+                snum    = _first_val(r, "situs_num")
+                sstreet = _first_val(r, "situs_street", "situs_str")
+                prop_address = f"{snum} {sstreet}".strip()
+                mail_addr = _first_val(r, "addr_line1", "mail_addr",
+                                       "mailing_address")
+                if prop_address or mail_addr:
+                    return {
+                        "prop_address": prop_address,
+                        "prop_city":    _first_val(r, "situs_city", "site_city"),
+                        "prop_state":   _first_val(r, "situs_state", "state") or "TX",
+                        "prop_zip":     _first_val(r, "situs_zip", "site_zip", "zip"),
+                        "mail_address": mail_addr,
+                        "mail_city":    _first_val(r, "addr_city", "mail_city"),
+                        "mail_state":   _first_val(r, "addr_state", "mail_state") or "TX",
+                        "mail_zip":     _first_val(r, "addr_zip", "mail_zip"),
+                    }
+            except Exception:
+                continue
+    return {}
 
 def lookup_parcel(owner: str) -> dict:
     if not owner:
@@ -211,26 +234,23 @@ def lookup_parcel(owner: str) -> dict:
     cache_key = owner.strip().upper()
     if cache_key in _parcel_cache:
         return _parcel_cache[cache_key]
-
+    result: dict = {}
     for variant in name_variants(owner):
-        for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
-            rows = _socrata_query(endpoint, variant)
-            if rows:
-                parcel = _row_to_parcel(rows[0])
-                if parcel.get("prop_address") or parcel.get("mail_address"):
-                    _parcel_cache[cache_key] = parcel
-                    return parcel
-
-    _parcel_cache[cache_key] = {}
-    return {}
+        result = _arcgis_lookup(variant)
+        if result.get("prop_address") or result.get("mail_address"):
+            break
+        result = _socrata_lookup(variant)
+        if result.get("prop_address") or result.get("mail_address"):
+            break
+    _parcel_cache[cache_key] = result
+    return result
 
 
 # ==============================================================================
-#  CLERK PORTAL  (Neumo SPA via Playwright)
+#  CLERK PORTAL
 # ==============================================================================
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
-    from urllib.parse import quote
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
@@ -239,7 +259,6 @@ def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
         f"&recordedDateFrom={quote(date_from, safe='')}"
         f"&recordedDateTo={quote(date_to, safe='')}"
     )
-
 
 def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
     hits: list = []
@@ -250,33 +269,26 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
             hits = hits.get("hits") or hits.get("items") or []
     elif isinstance(body, list):
         hits = body
-
     records = []
     for hit in hits:
         if not isinstance(hit, dict):
             continue
         src = hit.get("_source") or hit
-
         def g(*keys) -> str:
             for k in keys:
                 v = src.get(k)
                 if v:
                     return safe_str(v)
             return ""
-
-        doc_num   = g("instrumentNumber", "docNumber", "instrument_number",
-                      "doc_number", "InstrumentNumber")
-        filed     = g("recordedDate", "filedDate", "recorded_date",
-                      "file_date", "RecordedDate")
-        owner     = g("grantor", "grantors", "owner", "Grantor")
-        grantee   = g("grantee", "grantees", "Grantee")
-        legal     = g("legalDescription", "legal_description", "legal", "Legal")
-        amount    = g("consideration", "amount", "Amount", "Consideration")
-        dtype     = g("documentType", "doc_type", "DocumentType") or doc_type
-        doc_id    = (hit.get("id") or hit.get("_id") or
-                     hit.get("documentId") or "")
+        doc_num   = g("instrumentNumber","docNumber","instrument_number","InstrumentNumber")
+        filed     = g("recordedDate","filedDate","recorded_date","RecordedDate")
+        owner     = g("grantor","grantors","owner","Grantor")
+        grantee   = g("grantee","grantees","Grantee")
+        legal     = g("legalDescription","legal_description","legal","Legal")
+        amount    = g("consideration","amount","Amount","Consideration")
+        dtype     = g("documentType","doc_type","DocumentType") or doc_type
+        doc_id    = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
         clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
-
         if doc_num or owner:
             records.append({
                 "doc_num": doc_num, "doc_type": dtype,
@@ -285,7 +297,6 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
                 "amount": amount, "clerk_url": clerk_url,
             })
     return records
-
 
 def _text_to_row(text: str) -> dict[str, str]:
     row: dict[str, str] = {}
@@ -306,7 +317,6 @@ def _text_to_row(text: str) -> dict[str, str]:
         row["grantee"] = m.group(1).strip()
     return row
 
-
 def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
     def g(*keys) -> str:
         for k in keys:
@@ -315,32 +325,24 @@ def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
             if v:
                 return safe_str(v)
         return ""
-
     return {
-        "doc_num":   g("document number", "doc number", "instrument",
-                       "doc #", "doc_num", "instrumentnumber"),
-        "doc_type":  g("document type", "type", "doc type",
-                       "documenttype") or doc_type,
-        "filed":     _normalise_date(g("filed", "file date", "recorded",
-                                       "date filed", "date", "recordeddate")),
-        "owner":     g("grantor", "owner", "grantors"),
-        "grantee":   g("grantee", "grantees"),
-        "legal":     g("legal", "legal description", "description",
-                       "legaldescription"),
-        "amount":    g("amount", "consideration", "debt", "lien amount"),
+        "doc_num":   g("document number","doc number","instrument","doc #","doc_num"),
+        "doc_type":  g("document type","type","doc type","documenttype") or doc_type,
+        "filed":     _normalise_date(g("filed","file date","recorded","date filed","date")),
+        "owner":     g("grantor","owner","grantors"),
+        "grantee":   g("grantee","grantees"),
+        "legal":     g("legal","legal description","description","legaldescription"),
+        "amount":    g("amount","consideration","debt","lien amount"),
         "clerk_url": href,
     }
-
 
 async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
     records: list[dict] = []
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
-
     if soup.find(string=re.compile(
             r"no results|0 results|nothing found|no records", re.I)):
         return records
-
     table = soup.find("table")
     if table:
         headers = [th.get_text(" ", strip=True).lower()
@@ -350,12 +352,11 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
             if not cells:
                 continue
             link = tr.find("a", href=True)
-            href = _abs(link["href"]) if link else ""
+            href = _abs_url(link["href"]) if link else ""
             records.append(_row_to_record(
                 dict(zip(headers, cells)), href, doc_type))
         if records:
             return records
-
     for sel in [
         "[data-testid='result-item']", "[class*='record-card']",
         "[class*='result-item']",      "[class*='result-card']",
@@ -367,7 +368,7 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
         if cards:
             for card in cards:
                 link = card.find("a", href=True)
-                href = _abs(link["href"]) if link else ""
+                href = _abs_url(link["href"]) if link else ""
                 row  = _text_to_row(card.get_text(" ", strip=True))
                 rec  = _row_to_record(row, href, doc_type)
                 if not rec["doc_num"] and href:
@@ -378,9 +379,7 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                     records.append(rec)
             if records:
                 return records
-
     return records
-
 
 async def _click_next(page: Page) -> bool:
     btn = page.locator(
@@ -397,81 +396,6 @@ async def _click_next(page: Page) -> bool:
     await btn.click()
     await asyncio.sleep(2.5)
     return True
-
-
-async def _try_advanced_search(
-    context: BrowserContext,
-    doc_type: str,
-    date_from: str,
-    date_to: str,
-) -> list[dict]:
-    records: list[dict] = []
-    page: Page = await context.new_page()
-    api_responses: list[dict] = []
-
-    async def capture(response):
-        ct = response.headers.get("content-type", "")
-        if "json" in ct:
-            try:
-                api_responses.append(await response.json())
-            except Exception:
-                pass
-
-    page.on("response", capture)
-    try:
-        await page.goto(f"{CLERK_BASE}/search/advanced",
-                        timeout=45_000, wait_until="networkidle")
-        await asyncio.sleep(3)
-
-        for sel in ["input[placeholder*='Document Type' i]",
-                    "input[name*='docType' i]",
-                    "input[id*='docType' i]",
-                    "[data-testid*='docType' i]"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.click()
-                await el.fill(doc_type)
-                await asyncio.sleep(0.5)
-                drop = page.locator(
-                    f"[role='option']:has-text('{doc_type}'), "
-                    f"li:has-text('{doc_type}')"
-                ).first
-                if await drop.count() > 0:
-                    await drop.click()
-                break
-
-        for sel in ["input[placeholder*='Start' i]", "input[name*='start' i]",
-                    "input[id*='start' i]", "input[placeholder*='From' i]"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.fill(date_from)
-                break
-
-        for sel in ["input[placeholder*='End' i]", "input[name*='end' i]",
-                    "input[id*='end' i]", "input[placeholder*='To' i]"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.fill(date_to)
-                break
-
-        for sel in ["button[type='submit']", "button:has-text('Search')",
-                    "input[type='submit']"]:
-            btn = page.locator(sel).first
-            if await btn.count() > 0:
-                await btn.click()
-                break
-
-        await asyncio.sleep(4)
-        for body in api_responses:
-            records.extend(_extract_from_api(body, doc_type))
-        if not records:
-            records = await _parse_neumo_html(page, doc_type)
-    except Exception as exc:
-        log.warning("  Advanced search failed for %s: %s", doc_type, exc)
-    finally:
-        await page.close()
-    return records
-
 
 async def scrape_doc_type(
     context: BrowserContext,
@@ -494,49 +418,47 @@ async def scrape_doc_type(
                 pass
 
     page.on("response", capture)
-
     try:
         url = build_search_url(doc_type, date_from, date_to)
         log.info("  %s", url)
-
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                await page.goto(url, timeout=60_000,
-                                wait_until="networkidle")
+                await page.goto(url, timeout=60_000, wait_until="networkidle")
                 break
             except Exception as exc:
                 if attempt == RETRY_ATTEMPTS:
                     raise
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
-
         await asyncio.sleep(4)
-
+        title = await page.title()
+        if "Loading" in title:
+            for _ in range(15):
+                await asyncio.sleep(1)
+                title = await page.title()
+                if "Loading" not in title:
+                    break
         if doc_type == "LP":
             await screenshot(page, "search_LP")
             await save_html(page, "search_LP")
-
-        title = await page.title()
-        log.info("  title: %s | api responses: %d",
-                 title, len(api_responses))
-
-        # Strategy 1: intercepted API JSON
+        log.info("  title: %s | api: %d", title, len(api_responses))
         if api_responses:
             for body in api_responses:
                 records.extend(_extract_from_api(body, doc_type))
             if records:
                 if DEBUG and api_responses:
-                    (DEBUG_DIR / f"api_{doc_type}.json").write_text(
-                        json.dumps(api_responses[0],
-                                   indent=2, default=str)[:50000])
+                    try:
+                        (DEBUG_DIR / f"api_{doc_type}.json").write_text(
+                            json.dumps(api_responses[0],
+                                       indent=2, default=str)[:50000])
+                    except Exception:
+                        pass
                 for _ in range(20):
                     api_responses.clear()
                     if not await _click_next(page):
                         break
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
-
-        # Strategy 2: parse HTML
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
@@ -546,27 +468,17 @@ async def scrape_doc_type(
                 if not new:
                     break
                 records.extend(new)
-
-        # Strategy 3: advanced search form
-        if not records:
-            records = await _try_advanced_search(
-                context, doc_type, date_from, date_to)
-
         log.info("  -> %d records for %s", len(records), doc_type)
-
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
         if DEBUG:
             await screenshot(page, f"error_{doc_type}")
     finally:
         await page.close()
-
     return records
-
 
 async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
-
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -598,7 +510,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                                   {get: () => ['en-US','en']});
             window.chrome = {runtime: {}};
         """)
-
         warmup = await context.new_page()
         try:
             await warmup.goto(CLERK_BASE, timeout=30_000,
@@ -609,7 +520,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             log.warning("Warmup non-fatal: %s", exc)
         finally:
             await warmup.close()
-
         for code in DOC_TYPE_MAP:
             try:
                 recs = await scrape_doc_type(
@@ -621,9 +531,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             except Exception as exc:
                 log.error("Failed %s: %s", code, exc)
             await asyncio.sleep(2)
-
         await browser.close()
-
     return all_records
 
 
@@ -646,7 +554,6 @@ def compute_flags(rec: dict, today: datetime) -> list[str]:
         pass
     seen: set[str] = set()
     return [f for f in flags if not (f in seen or seen.add(f))]
-
 
 def compute_score(rec: dict, flags: list[str]) -> int:
     score = 30
@@ -673,7 +580,6 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     assembled: list[dict] = []
     seen: set[str] = set()
     total = len(raw_records)
-
     for i, raw in enumerate(raw_records, 1):
         try:
             doc_num = safe_str(raw.get("doc_num", ""))
@@ -681,16 +587,13 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
                 continue
             if doc_num:
                 seen.add(doc_num)
-
             owner      = safe_str(raw.get("owner", ""))
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
-
-            if i % 10 == 0:
+            if i % 20 == 0:
                 log.info("  Parcel lookup %d/%d (cache: %d)",
                          i, total, len(_parcel_cache))
             parcel = lookup_parcel(owner)
-
             rec: dict = {
                 "doc_num":      doc_num,
                 "doc_type":     safe_str(raw.get("doc_type", "")),
@@ -719,17 +622,15 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
             assembled.append(rec)
         except Exception as exc:
             log.warning("Skipping bad record: %s", exc)
-
     assembled.sort(key=lambda r: r["score"], reverse=True)
     with_addr = sum(1 for r in assembled if r.get("prop_address"))
     log.info("Assembled %d records, %d with address", len(assembled), with_addr)
     return assembled
 
-
 def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     payload = {
         "fetched_at":   datetime.now(timezone.utc).isoformat(),
-        "source":       "Collin County Clerk / Collin CAD (Texas Open Data)",
+        "source":       "Collin County Clerk / Collin CAD",
         "date_range":   {"from": date_from, "to": date_to},
         "total":        len(records),
         "with_address": sum(1 for r in records if r.get("prop_address")),
@@ -738,7 +639,6 @@ def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     for path in [DASHBOARD_DIR / "records.json", DATA_DIR / "records.json"]:
         path.write_text(json.dumps(payload, indent=2, default=str))
         log.info("Saved -> %s", path)
-
 
 def export_ghl_csv(records: list[dict]) -> None:
     out_path = DATA_DIR / "ghl_export.csv"
@@ -750,7 +650,6 @@ def export_ghl_csv(records: list[dict]) -> None:
         "Amount/Debt Owed", "Seller Score", "Motivated Seller Flags",
         "Source", "Public Records URL",
     ]
-
     def split_name(full: str) -> tuple[str, str]:
         parts = full.strip().split()
         if not parts:
@@ -758,7 +657,6 @@ def export_ghl_csv(records: list[dict]) -> None:
         if len(parts) == 1:
             return parts[0], ""
         return " ".join(parts[:-1]), parts[-1]
-
     with out_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=cols)
         writer.writeheader()
@@ -798,20 +696,16 @@ async def main() -> None:
     fmt = "%-m/%-d/%Y" if sys.platform != "win32" else "%#m/%#d/%Y"
     date_from = start.strftime(fmt)
     date_to   = today.strftime(fmt)
-
     log.info("=" * 60)
     log.info("Collin County Motivated Seller Scraper")
     log.info("Range: %s -> %s", date_from, date_to)
-    log.info("Parcel source: Texas Open Data Portal (live lookup)")
+    log.info("Parcel: ArcGIS MapServer (Allen City GIS / CCAD)")
     log.info("=" * 60)
-
     raw_records = await run_clerk_scrape(date_from, date_to)
     log.info("Raw records from clerk: %d", len(raw_records))
-
     records = assemble_records(raw_records, today)
     save_output(records, date_from, date_to)
     export_ghl_csv(records)
-
     log.info("Complete. %d records, %d with address.",
              len(records), sum(1 for r in records if r.get("prop_address")))
 
