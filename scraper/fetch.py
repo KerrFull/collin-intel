@@ -1,6 +1,3 @@
-bash
-
-cat > /mnt/user-data/outputs/collin-scraper/scraper/fetch.py << 'PYEOF'
 #!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
@@ -39,18 +36,15 @@ logging.basicConfig(
 log = logging.getLogger("collin_scraper")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
-CLERK_BASE    = "https://collin.tx.publicsearch.us"
-LOOKBACK_DAYS = 7
+CLERK_BASE     = "https://collin.tx.publicsearch.us"
+LOOKBACK_DAYS  = 7
 RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
 DEBUG          = True
 
-# Texas Open Data Portal — Collin CAD datasets (Socrata)
-# Primary:  Owner Prop List  (owner + mailing address)
-# Fallback: Appraisal Data Preliminary (full appraisal record)
-SOCRATA_OWNER  = "https://data.texas.gov/resource/ahis-pci3.json"
-SOCRATA_APPR   = "https://data.texas.gov/resource/nne4-8riu.json"
-SOCRATA_LIMIT  = 1   # we only need 1 match per owner lookup
+# Texas Open Data Portal Socrata endpoints
+SOCRATA_OWNER = "https://data.texas.gov/resource/ahis-pci3.json"
+SOCRATA_APPR  = "https://data.texas.gov/resource/nne4-8riu.json"
 
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
@@ -75,16 +69,17 @@ ROOT          = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 DATA_DIR      = ROOT / "data"
 DEBUG_DIR     = ROOT / "debug"
-for d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
-    d.mkdir(parents=True, exist_ok=True)
+for _d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
+    _d.mkdir(parents=True, exist_ok=True)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  HELPERS
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def safe_str(val: Any) -> str:
     return str(val).strip() if val is not None else ""
+
 
 def parse_amount(raw: str) -> float | None:
     cleaned = re.sub(r"[^\d.]", "", raw)
@@ -92,6 +87,7 @@ def parse_amount(raw: str) -> float | None:
         return float(cleaned) if cleaned else None
     except ValueError:
         return None
+
 
 def name_variants(full_name: str) -> list[str]:
     full_name = full_name.strip().upper()
@@ -102,61 +98,56 @@ def name_variants(full_name: str) -> list[str]:
         variants.add(f"{parts[-1]}, {' '.join(parts[:-1])}")
     return [v for v in variants if v]
 
+
 def _abs(href: str) -> str:
     if not href:
         return ""
     return href if href.startswith("http") else f"{CLERK_BASE}{href}"
 
+
 def _normalise_date(raw: str) -> str:
     if not raw:
         return ""
-    if re.match(r'\d{1,2}/\d{1,2}/\d{4}', raw):
+    if re.match(r"\d{1,2}/\d{1,2}/\d{4}", raw):
         return raw
-    m = re.match(r'(\d{4})-(\d{2})-(\d{2})', raw)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", raw)
     if m:
         return f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
     return raw
 
+
 async def screenshot(page: Page, name: str) -> None:
-    if not DEBUG: return
+    if not DEBUG:
+        return
     try:
         await page.screenshot(path=str(DEBUG_DIR / f"{name}.png"), full_page=True)
-        log.info("  📸 %s.png", name)
+        log.info("  screenshot: %s.png", name)
     except Exception as exc:
-        log.warning("  Screenshot failed: %s", exc)
+        log.warning("  screenshot failed: %s", exc)
+
 
 async def save_html(page: Page, name: str) -> None:
-    if not DEBUG: return
+    if not DEBUG:
+        return
     try:
         (DEBUG_DIR / f"{name}.html").write_text(await page.content(), encoding="utf-8")
-        log.info("  📄 %s.html", name)
+        log.info("  html saved: %s.html", name)
     except Exception as exc:
-        log.warning("  HTML save failed: %s", exc)
+        log.warning("  html save failed: %s", exc)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PARCEL LOOKUP — Texas Open Data Portal (Socrata)
-#
-#  We do NOT download a bulk file. Instead we query per-owner on demand.
-#  The Socrata API is free, no auth required, rate limit ~1000 req/hour.
-#  We cache results in a dict to avoid duplicate calls for same owner.
-#
-#  Datasets used (in order of preference):
-#    ahis-pci3  — "Collin CAD Owner Prop List"  (owner + site + mail)
-#    nne4-8riu  — "Collin CAD Appraisal Data - Preliminary" (fallback)
-#
-#  Column names discovered from Texas Open Data Portal documentation and
-#  TrueAutomation/Socrata standard CCAD layout.
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  PARCEL LOOKUP via Texas Open Data Portal (Socrata — live per-owner query)
+# ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
 
-# Known possible column names for each field across CCAD Socrata datasets.
-# We try all of them and take the first non-empty value.
 _OWNER_COLS   = ["owner_name", "ownername", "owner", "own1", "own_name"]
-_SADDR_COLS   = ["situs_num", "site_num", "situs_street_num"]
-_SSTREET_COLS = ["situs_street", "site_street", "situs_str", "street_name"]
-_SCITY_COLS   = ["situs_city", "site_city", "prop_city", "city_name"]
+_SADDR_COLS   = ["situs_address", "site_address", "prop_address", "situs_addr",
+                 "site_addr", "location_address", "address"]
+_SNUM_COLS    = ["situs_num", "site_num", "situs_street_num"]
+_SSTR_COLS    = ["situs_street", "site_street", "situs_str", "street_name"]
+_SCITY_COLS   = ["situs_city", "site_city", "prop_city", "city_name", "city"]
 _SSTATE_COLS  = ["situs_state", "site_state", "state"]
 _SZIP_COLS    = ["situs_zip", "site_zip", "zip_code", "zip"]
 _MADDR_COLS   = ["mail_addr", "mailing_address", "mail_address", "addr_line1",
@@ -175,23 +166,13 @@ def _first(row: dict, *cols) -> str:
 
 
 def _row_to_parcel(row: dict) -> dict:
-    """Convert a Socrata row to our parcel dict, trying all known column names."""
-    # Build site address from num + street, or from a combined field
-    snum    = _first(row, *_SADDR_COLS)
-    sstreet = _first(row, *_SSTREET_COLS)
-    # Some datasets have a combined situs_address field
-    saddr_combined = _first(row, "situs_address", "site_address",
-                             "prop_address", "situs_addr", "site_addr",
-                             "location_address", "address")
-    if saddr_combined:
-        prop_address = saddr_combined
-    elif snum and sstreet:
-        prop_address = f"{snum} {sstreet}"
-    else:
-        prop_address = snum or sstreet
-
+    saddr = _first(row, *_SADDR_COLS)
+    if not saddr:
+        snum    = _first(row, *_SNUM_COLS)
+        sstreet = _first(row, *_SSTR_COLS)
+        saddr   = f"{snum} {sstreet}".strip() if (snum or sstreet) else ""
     return {
-        "prop_address": prop_address,
+        "prop_address": saddr,
         "prop_city":    _first(row, *_SCITY_COLS),
         "prop_state":   _first(row, *_SSTATE_COLS) or "TX",
         "prop_zip":     _first(row, *_SZIP_COLS),
@@ -203,20 +184,14 @@ def _row_to_parcel(row: dict) -> dict:
 
 
 def _socrata_query(endpoint: str, owner_variant: str) -> list[dict]:
-    """
-    Query a Socrata endpoint for a single owner name variant.
-    Uses $where= upper(owner_col) = 'NAME' across all known owner column names.
-    """
-    # Escape single quotes in name
     safe_name = owner_variant.replace("'", "''")
-    results = []
     for col in _OWNER_COLS:
         try:
             resp = requests.get(
                 endpoint,
                 params={
                     "$where": f"upper({col}) = '{safe_name}'",
-                    "$limit": SOCRATA_LIMIT,
+                    "$limit": 1,
                 },
                 timeout=8,
                 headers={"Accept": "application/json"},
@@ -224,44 +199,35 @@ def _socrata_query(endpoint: str, owner_variant: str) -> list[dict]:
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and data:
-                    results = data
-                    break
+                    return data
         except Exception:
             pass
-    return results
+    return []
 
 
 def lookup_parcel(owner: str) -> dict:
-    """
-    Look up a property address for an owner name.
-    Checks cache first, then queries Socrata, tries both datasets.
-    """
     if not owner:
         return {}
-
     cache_key = owner.strip().upper()
     if cache_key in _parcel_cache:
         return _parcel_cache[cache_key]
 
     for variant in name_variants(owner):
-        # Try primary dataset first (Owner Prop List)
         for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
             rows = _socrata_query(endpoint, variant)
             if rows:
                 parcel = _row_to_parcel(rows[0])
-                # Only cache and return if we actually got an address
                 if parcel.get("prop_address") or parcel.get("mail_address"):
                     _parcel_cache[cache_key] = parcel
                     return parcel
 
-    # Cache empty result to avoid re-querying
     _parcel_cache[cache_key] = {}
     return {}
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  CLERK PORTAL — Neumo SPA  (Playwright)
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  CLERK PORTAL  (Neumo SPA via Playwright)
+# ==============================================================================
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
     from urllib.parse import quote
@@ -287,22 +253,30 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
 
     records = []
     for hit in hits:
-        if not isinstance(hit, dict): continue
+        if not isinstance(hit, dict):
+            continue
         src = hit.get("_source") or hit
+
         def g(*keys) -> str:
             for k in keys:
                 v = src.get(k)
-                if v: return safe_str(v)
+                if v:
+                    return safe_str(v)
             return ""
-        doc_num = g("instrumentNumber","docNumber","instrument_number","doc_number","InstrumentNumber")
-        filed   = g("recordedDate","filedDate","recorded_date","file_date","RecordedDate")
-        owner   = g("grantor","grantors","owner","Grantor")
-        grantee = g("grantee","grantees","Grantee")
-        legal   = g("legalDescription","legal_description","legal","Legal")
-        amount  = g("consideration","amount","Amount","Consideration")
-        dtype   = g("documentType","doc_type","DocumentType") or doc_type
-        doc_id  = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
+
+        doc_num   = g("instrumentNumber", "docNumber", "instrument_number",
+                      "doc_number", "InstrumentNumber")
+        filed     = g("recordedDate", "filedDate", "recorded_date",
+                      "file_date", "RecordedDate")
+        owner     = g("grantor", "grantors", "owner", "Grantor")
+        grantee   = g("grantee", "grantees", "Grantee")
+        legal     = g("legalDescription", "legal_description", "legal", "Legal")
+        amount    = g("consideration", "amount", "Amount", "Consideration")
+        dtype     = g("documentType", "doc_type", "DocumentType") or doc_type
+        doc_id    = (hit.get("id") or hit.get("_id") or
+                     hit.get("documentId") or "")
         clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
+
         if doc_num or owner:
             records.append({
                 "doc_num": doc_num, "doc_type": dtype,
@@ -315,33 +289,45 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
 
 def _text_to_row(text: str) -> dict[str, str]:
     row: dict[str, str] = {}
-    m = re.search(r'(\d{4}-\d{5,}|\d{8,})', text)
-    if m: row["document number"] = m.group(1)
-    m = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', text)
-    if m: row["filed"] = m.group(1)
-    m = re.search(r'\$[\d,]+(?:\.\d{2})?', text)
-    if m: row["amount"] = m.group(0)
-    m = re.search(r'Grantor[:\s]+([^\n|]+)', text, re.I)
-    if m: row["grantor"] = m.group(1).strip()
-    m = re.search(r'Grantee[:\s]+([^\n|]+)', text, re.I)
-    if m: row["grantee"] = m.group(1).strip()
+    m = re.search(r"(\d{4}-\d{5,}|\d{8,})", text)
+    if m:
+        row["document number"] = m.group(1)
+    m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", text)
+    if m:
+        row["filed"] = m.group(1)
+    m = re.search(r"\$[\d,]+(?:\.\d{2})?", text)
+    if m:
+        row["amount"] = m.group(0)
+    m = re.search(r"Grantor[:\s]+([^\n|]+)", text, re.I)
+    if m:
+        row["grantor"] = m.group(1).strip()
+    m = re.search(r"Grantee[:\s]+([^\n|]+)", text, re.I)
+    if m:
+        row["grantee"] = m.group(1).strip()
     return row
 
 
 def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
     def g(*keys) -> str:
         for k in keys:
-            v = row.get(k,"") or row.get(k.lower(),"") or row.get(k.upper(),"")
-            if v: return safe_str(v)
+            v = (row.get(k, "") or row.get(k.lower(), "") or
+                 row.get(k.upper(), ""))
+            if v:
+                return safe_str(v)
         return ""
+
     return {
-        "doc_num":   g("document number","doc number","instrument","doc #","doc_num","instrumentnumber"),
-        "doc_type":  g("document type","type","doc type","documenttype") or doc_type,
-        "filed":     _normalise_date(g("filed","file date","recorded","date filed","date","recordeddate")),
-        "owner":     g("grantor","owner","grantors"),
-        "grantee":   g("grantee","grantees"),
-        "legal":     g("legal","legal description","description","legaldescription"),
-        "amount":    g("amount","consideration","debt","lien amount"),
+        "doc_num":   g("document number", "doc number", "instrument",
+                       "doc #", "doc_num", "instrumentnumber"),
+        "doc_type":  g("document type", "type", "doc type",
+                       "documenttype") or doc_type,
+        "filed":     _normalise_date(g("filed", "file date", "recorded",
+                                       "date filed", "date", "recordeddate")),
+        "owner":     g("grantor", "owner", "grantors"),
+        "grantee":   g("grantee", "grantees"),
+        "legal":     g("legal", "legal description", "description",
+                       "legaldescription"),
+        "amount":    g("amount", "consideration", "debt", "lien amount"),
         "clerk_url": href,
     }
 
@@ -351,28 +337,31 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
 
-    if soup.find(string=re.compile(r"no results|0 results|nothing found|no records", re.I)):
+    if soup.find(string=re.compile(
+            r"no results|0 results|nothing found|no records", re.I)):
         return records
 
-    # Table layout
     table = soup.find("table")
     if table:
-        headers = [th.get_text(" ", strip=True).lower() for th in table.find_all("th")]
+        headers = [th.get_text(" ", strip=True).lower()
+                   for th in table.find_all("th")]
         for tr in table.find_all("tr")[1:]:
             cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            if not cells: continue
+            if not cells:
+                continue
             link = tr.find("a", href=True)
             href = _abs(link["href"]) if link else ""
-            records.append(_row_to_record(dict(zip(headers, cells)), href, doc_type))
-        if records: return records
+            records.append(_row_to_record(
+                dict(zip(headers, cells)), href, doc_type))
+        if records:
+            return records
 
-    # Card layout
     for sel in [
         "[data-testid='result-item']", "[class*='record-card']",
-        "[class*='result-item']", "[class*='result-card']",
-        "[class*='search-result']", "li[class*='result']",
-        "div[class*='ResultItem']", "div[class*='RecordItem']",
-        "div[class*='Hit']", "article",
+        "[class*='result-item']",      "[class*='result-card']",
+        "[class*='search-result']",    "li[class*='result']",
+        "div[class*='ResultItem']",    "div[class*='RecordItem']",
+        "div[class*='Hit']",           "article",
     ]:
         cards = soup.select(sel)
         if cards:
@@ -383,10 +372,12 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                 rec  = _row_to_record(row, href, doc_type)
                 if not rec["doc_num"] and href:
                     m = re.search(r"/doc/([^/?#]+)", href)
-                    if m: rec["doc_num"] = m.group(1)
+                    if m:
+                        rec["doc_num"] = m.group(1)
                 if rec["doc_num"] or rec["owner"]:
                     records.append(rec)
-            if records: return records
+            if records:
+                return records
 
     return records
 
@@ -394,20 +385,25 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
 async def _click_next(page: Page) -> bool:
     btn = page.locator(
         "button:has-text('Next'), [aria-label='Next page'], "
-        "[data-testid='next-page'], button[class*='next' i], a:has-text('Next')"
+        "[data-testid='next-page'], button[class*='next' i], "
+        "a:has-text('Next')"
     ).first
-    if await btn.count() == 0: return False
+    if await btn.count() == 0:
+        return False
     disabled = await btn.get_attribute("disabled")
     cls = (await btn.get_attribute("class") or "").lower()
-    if disabled is not None or "disabled" in cls: return False
+    if disabled is not None or "disabled" in cls:
+        return False
     await btn.click()
     await asyncio.sleep(2.5)
     return True
 
 
 async def _try_advanced_search(
-    context: BrowserContext, doc_type: str,
-    date_from: str, date_to: str,
+    context: BrowserContext,
+    doc_type: str,
+    date_from: str,
+    date_to: str,
 ) -> list[dict]:
     records: list[dict] = []
     page: Page = await context.new_page()
@@ -416,36 +412,54 @@ async def _try_advanced_search(
     async def capture(response):
         ct = response.headers.get("content-type", "")
         if "json" in ct:
-            try: api_responses.append(await response.json())
-            except Exception: pass
+            try:
+                api_responses.append(await response.json())
+            except Exception:
+                pass
 
     page.on("response", capture)
     try:
-        await page.goto(f"{CLERK_BASE}/search/advanced", timeout=45_000, wait_until="networkidle")
+        await page.goto(f"{CLERK_BASE}/search/advanced",
+                        timeout=45_000, wait_until="networkidle")
         await asyncio.sleep(3)
 
-        for sel in ["input[placeholder*='Document Type' i]", "input[name*='docType' i]",
-                    "input[id*='docType' i]", "[data-testid*='docType' i]"]:
+        for sel in ["input[placeholder*='Document Type' i]",
+                    "input[name*='docType' i]",
+                    "input[id*='docType' i]",
+                    "[data-testid*='docType' i]"]:
             el = page.locator(sel).first
             if await el.count() > 0:
-                await el.click(); await el.fill(doc_type); await asyncio.sleep(0.5)
-                drop = page.locator(f"[role='option']:has-text('{doc_type}'), li:has-text('{doc_type}')").first
-                if await drop.count() > 0: await drop.click()
+                await el.click()
+                await el.fill(doc_type)
+                await asyncio.sleep(0.5)
+                drop = page.locator(
+                    f"[role='option']:has-text('{doc_type}'), "
+                    f"li:has-text('{doc_type}')"
+                ).first
+                if await drop.count() > 0:
+                    await drop.click()
                 break
 
         for sel in ["input[placeholder*='Start' i]", "input[name*='start' i]",
                     "input[id*='start' i]", "input[placeholder*='From' i]"]:
             el = page.locator(sel).first
-            if await el.count() > 0: await el.fill(date_from); break
+            if await el.count() > 0:
+                await el.fill(date_from)
+                break
 
         for sel in ["input[placeholder*='End' i]", "input[name*='end' i]",
                     "input[id*='end' i]", "input[placeholder*='To' i]"]:
             el = page.locator(sel).first
-            if await el.count() > 0: await el.fill(date_to); break
+            if await el.count() > 0:
+                await el.fill(date_to)
+                break
 
-        for sel in ["button[type='submit']", "button:has-text('Search')", "input[type='submit']"]:
+        for sel in ["button[type='submit']", "button:has-text('Search')",
+                    "input[type='submit']"]:
             btn = page.locator(sel).first
-            if await btn.count() > 0: await btn.click(); break
+            if await btn.count() > 0:
+                await btn.click()
+                break
 
         await asyncio.sleep(4)
         for body in api_responses:
@@ -460,8 +474,10 @@ async def _try_advanced_search(
 
 
 async def scrape_doc_type(
-    context: BrowserContext, doc_type: str,
-    date_from: str, date_to: str,
+    context: BrowserContext,
+    doc_type: str,
+    date_from: str,
+    date_to: str,
 ) -> list[dict]:
     page: Page = await context.new_page()
     records: list[dict] = []
@@ -469,9 +485,13 @@ async def scrape_doc_type(
 
     async def capture(response):
         ct = response.headers.get("content-type", "")
-        if "json" in ct and any(x in response.url for x in ["/api/", "/search", "/result", "/record"]):
-            try: api_responses.append(await response.json())
-            except Exception: pass
+        if "json" in ct and any(x in response.url
+                                for x in ["/api/", "/search",
+                                          "/result", "/record"]):
+            try:
+                api_responses.append(await response.json())
+            except Exception:
+                pass
 
     page.on("response", capture)
 
@@ -481,10 +501,12 @@ async def scrape_doc_type(
 
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
-                await page.goto(url, timeout=60_000, wait_until="networkidle")
+                await page.goto(url, timeout=60_000,
+                                wait_until="networkidle")
                 break
             except Exception as exc:
-                if attempt == RETRY_ATTEMPTS: raise
+                if attempt == RETRY_ATTEMPTS:
+                    raise
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
 
@@ -495,7 +517,8 @@ async def scrape_doc_type(
             await save_html(page, "search_LP")
 
         title = await page.title()
-        log.info("  title: %s | api responses: %d", title, len(api_responses))
+        log.info("  title: %s | api responses: %d",
+                 title, len(api_responses))
 
         # Strategy 1: intercepted API JSON
         if api_responses:
@@ -504,10 +527,12 @@ async def scrape_doc_type(
             if records:
                 if DEBUG and api_responses:
                     (DEBUG_DIR / f"api_{doc_type}.json").write_text(
-                        json.dumps(api_responses[0], indent=2, default=str)[:50000])
+                        json.dumps(api_responses[0],
+                                   indent=2, default=str)[:50000])
                 for _ in range(20):
                     api_responses.clear()
-                    if not await _click_next(page): break
+                    if not await _click_next(page):
+                        break
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
 
@@ -515,20 +540,24 @@ async def scrape_doc_type(
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
-                if not await _click_next(page): break
+                if not await _click_next(page):
+                    break
                 new = await _parse_neumo_html(page, doc_type)
-                if not new: break
+                if not new:
+                    break
                 records.extend(new)
 
         # Strategy 3: advanced search form
         if not records:
-            records = await _try_advanced_search(context, doc_type, date_from, date_to)
+            records = await _try_advanced_search(
+                context, doc_type, date_from, date_to)
 
-        log.info("  → %d records for %s", len(records), doc_type)
+        log.info("  -> %d records for %s", len(records), doc_type)
 
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
-        if DEBUG: await screenshot(page, f"error_{doc_type}")
+        if DEBUG:
+            await screenshot(page, f"error_{doc_type}")
     finally:
         await page.close()
 
@@ -541,9 +570,13 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled",
-                  "--disable-infobars", "--window-size=1280,900"],
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1280,900",
+            ],
         )
         context = await browser.new_context(
             user_agent=(
@@ -554,20 +587,22 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             viewport={"width": 1280, "height": 900},
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": ("text/html,application/xhtml+xml,"
+                           "application/xml;q=0.9,*/*;q=0.8"),
             },
         )
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            Object.defineProperty(navigator, 'languages',
+                                  {get: () => ['en-US','en']});
             window.chrome = {runtime: {}};
         """)
 
-        # Warm-up
         warmup = await context.new_page()
         try:
-            await warmup.goto(CLERK_BASE, timeout=30_000, wait_until="networkidle")
+            await warmup.goto(CLERK_BASE, timeout=30_000,
+                              wait_until="networkidle")
             await asyncio.sleep(3)
             await screenshot(warmup, "homepage")
         except Exception as exc:
@@ -577,7 +612,8 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         for code in DOC_TYPE_MAP:
             try:
-                recs = await scrape_doc_type(context, code, date_from, date_to)
+                recs = await scrape_doc_type(
+                    context, code, date_from, date_to)
                 for r in recs:
                     r["cat"]       = code
                     r["cat_label"] = DOC_TYPE_MAP[code][1]
@@ -591,18 +627,19 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     return all_records
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  SCORING
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def compute_flags(rec: dict, today: datetime) -> list[str]:
-    flags: list[str] = list(DOC_TYPE_MAP.get(rec["cat"], ("","",[])) [2])
+    flags: list[str] = list(DOC_TYPE_MAP.get(rec["cat"], ("", "", []))[2])
     owner_up = rec.get("owner", "").upper()
     if any(kw in owner_up for kw in
-           ["LLC","INC","CORP","LTD","L.L.C","TRUST","HOLDINGS","PROPERTIES"]):
+           ["LLC", "INC", "CORP", "LTD", "L.L.C",
+            "TRUST", "HOLDINGS", "PROPERTIES"]):
         flags.append("LLC / corp owner")
     try:
-        filed_dt = datetime.strptime(rec.get("filed",""), "%m/%d/%Y")
+        filed_dt = datetime.strptime(rec.get("filed", ""), "%m/%d/%Y")
         if (today - filed_dt).days <= 7:
             flags.append("New this week")
     except ValueError:
@@ -628,9 +665,9 @@ def compute_score(rec: dict, flags: list[str]) -> int:
     return min(score, 100)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  ASSEMBLE + SAVE
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     assembled: list[dict] = []
@@ -640,16 +677,17 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     for i, raw in enumerate(raw_records, 1):
         try:
             doc_num = safe_str(raw.get("doc_num", ""))
-            if doc_num and doc_num in seen: continue
-            if doc_num: seen.add(doc_num)
+            if doc_num and doc_num in seen:
+                continue
+            if doc_num:
+                seen.add(doc_num)
 
             owner      = safe_str(raw.get("owner", ""))
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
 
-            # Live parcel lookup — show progress every 10 records
             if i % 10 == 0:
-                log.info("  Parcel lookup progress: %d/%d (cache size: %d)",
+                log.info("  Parcel lookup %d/%d (cache: %d)",
                          i, total, len(_parcel_cache))
             parcel = lookup_parcel(owner)
 
@@ -684,7 +722,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
 
     assembled.sort(key=lambda r: r["score"], reverse=True)
     with_addr = sum(1 for r in assembled if r.get("prop_address"))
-    log.info("Assembled %d unique records, %d with address", len(assembled), with_addr)
+    log.info("Assembled %d records, %d with address", len(assembled), with_addr)
     return assembled
 
 
@@ -699,56 +737,60 @@ def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     }
     for path in [DASHBOARD_DIR / "records.json", DATA_DIR / "records.json"]:
         path.write_text(json.dumps(payload, indent=2, default=str))
-        log.info("Saved → %s", path)
+        log.info("Saved -> %s", path)
 
 
 def export_ghl_csv(records: list[dict]) -> None:
     out_path = DATA_DIR / "ghl_export.csv"
     cols = [
-        "First Name","Last Name",
-        "Mailing Address","Mailing City","Mailing State","Mailing Zip",
-        "Property Address","Property City","Property State","Property Zip",
-        "Lead Type","Document Type","Date Filed","Document Number",
-        "Amount/Debt Owed","Seller Score","Motivated Seller Flags",
-        "Source","Public Records URL",
+        "First Name", "Last Name",
+        "Mailing Address", "Mailing City", "Mailing State", "Mailing Zip",
+        "Property Address", "Property City", "Property State", "Property Zip",
+        "Lead Type", "Document Type", "Date Filed", "Document Number",
+        "Amount/Debt Owed", "Seller Score", "Motivated Seller Flags",
+        "Source", "Public Records URL",
     ]
+
     def split_name(full: str) -> tuple[str, str]:
         parts = full.strip().split()
-        if not parts: return "", ""
-        if len(parts) == 1: return parts[0], ""
+        if not parts:
+            return "", ""
+        if len(parts) == 1:
+            return parts[0], ""
         return " ".join(parts[:-1]), parts[-1]
 
     with out_path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=cols)
         writer.writeheader()
         for r in records:
-            first, last = split_name(r.get("owner",""))
+            first, last = split_name(r.get("owner", ""))
             writer.writerow({
-                "First Name": first, "Last Name": last,
-                "Mailing Address": r.get("mail_address",""),
-                "Mailing City": r.get("mail_city",""),
-                "Mailing State": r.get("mail_state","TX"),
-                "Mailing Zip": r.get("mail_zip",""),
-                "Property Address": r.get("prop_address",""),
-                "Property City": r.get("prop_city",""),
-                "Property State": r.get("prop_state","TX"),
-                "Property Zip": r.get("prop_zip",""),
-                "Lead Type": r.get("cat",""),
-                "Document Type": r.get("cat_label",""),
-                "Date Filed": r.get("filed",""),
-                "Document Number": r.get("doc_num",""),
-                "Amount/Debt Owed": r.get("amount",""),
-                "Seller Score": r.get("score",0),
-                "Motivated Seller Flags": "; ".join(r.get("flags",[])),
-                "Source": "Collin County Clerk",
-                "Public Records URL": r.get("clerk_url",""),
+                "First Name":             first,
+                "Last Name":              last,
+                "Mailing Address":        r.get("mail_address", ""),
+                "Mailing City":           r.get("mail_city", ""),
+                "Mailing State":          r.get("mail_state", "TX"),
+                "Mailing Zip":            r.get("mail_zip", ""),
+                "Property Address":       r.get("prop_address", ""),
+                "Property City":          r.get("prop_city", ""),
+                "Property State":         r.get("prop_state", "TX"),
+                "Property Zip":           r.get("prop_zip", ""),
+                "Lead Type":              r.get("cat", ""),
+                "Document Type":          r.get("cat_label", ""),
+                "Date Filed":             r.get("filed", ""),
+                "Document Number":        r.get("doc_num", ""),
+                "Amount/Debt Owed":       r.get("amount", ""),
+                "Seller Score":           r.get("score", 0),
+                "Motivated Seller Flags": "; ".join(r.get("flags", [])),
+                "Source":                 "Collin County Clerk",
+                "Public Records URL":     r.get("clerk_url", ""),
             })
-    log.info("GHL CSV → %s", out_path)
+    log.info("GHL CSV -> %s", out_path)
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 
 async def main() -> None:
     today = datetime.now()
@@ -757,20 +799,16 @@ async def main() -> None:
     date_from = start.strftime(fmt)
     date_to   = today.strftime(fmt)
 
-    log.info("═" * 60)
+    log.info("=" * 60)
     log.info("Collin County Motivated Seller Scraper")
-    log.info("Range: %s → %s", date_from, date_to)
+    log.info("Range: %s -> %s", date_from, date_to)
     log.info("Parcel source: Texas Open Data Portal (live lookup)")
-    log.info("═" * 60)
+    log.info("=" * 60)
 
-    # Scrape clerk portal
     raw_records = await run_clerk_scrape(date_from, date_to)
     log.info("Raw records from clerk: %d", len(raw_records))
 
-    # Assemble (includes live parcel lookups)
     records = assemble_records(raw_records, today)
-
-    # Save outputs
     save_output(records, date_from, date_to)
     export_ghl_csv(records)
 
@@ -780,8 +818,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-PYEOF
-echo "Done — $(wc -l < /mnt/user-data/outputs/collin-scraper/scraper/fetch.py) lines"
-Output
-
-
