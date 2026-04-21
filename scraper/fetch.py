@@ -3,6 +3,8 @@
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
 Parcel data  : Texas Open Data Socrata ahis-pci3
+               Confirmed fields: ownername, owneraddrline1, owneraddrcity,
+               owneraddrstate, owneraddrzip, situsconcat
 Look-back    : last 7 days
 """
 
@@ -36,6 +38,7 @@ RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
 DEBUG          = True
 
+# Confirmed working Socrata endpoints + field names from diagnostic run
 SOCRATA_OWNER = "https://data.texas.gov/resource/ahis-pci3.json"
 SOCRATA_APPR  = "https://data.texas.gov/resource/nne4-8riu.json"
 
@@ -69,9 +72,6 @@ DATA_DIR      = ROOT / "data"
 DEBUG_DIR     = ROOT / "debug"
 for _d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
-
-# Flag so we only log the full Socrata row once
-_socrata_row_logged = False
 
 
 # ==============================================================================
@@ -112,6 +112,33 @@ def _normalise_date(raw: str) -> str:
         return f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
     return raw
 
+def _parse_situsconcat(situs: str) -> tuple[str, str, str, str]:
+    """
+    Parse situsconcat like '420 RIDGEWOOD DR , RICHARDSON, TX 75080'
+    into (address, city, state, zip).
+    """
+    situs = situs.strip()
+    # Extract zip
+    zip_m = re.search(r"\b(\d{5})(?:-\d{4})?\s*$", situs)
+    prop_zip = zip_m.group(1) if zip_m else ""
+    remainder = situs[:zip_m.start()].strip(" ,") if zip_m else situs
+
+    # Extract state (2 uppercase letters before zip)
+    st_m = re.search(r",?\s*([A-Z]{2})\s*$", remainder)
+    prop_state = st_m.group(1) if st_m else "TX"
+    remainder = remainder[:st_m.start()].strip(" ,") if st_m else remainder
+
+    # Split on last comma to get city
+    parts = remainder.rsplit(",", 1)
+    if len(parts) == 2:
+        prop_addr = parts[0].strip()
+        prop_city = parts[1].strip()
+    else:
+        prop_addr = remainder.strip()
+        prop_city = ""
+
+    return prop_addr, prop_city, prop_state, prop_zip
+
 async def screenshot(page: Page, name: str) -> None:
     if not DEBUG:
         return
@@ -133,21 +160,16 @@ async def save_html(page: Page, name: str) -> None:
 
 # ==============================================================================
 #  PARCEL LOOKUP
+#  Confirmed field names from diagnostic run on 2026-04-21:
+#    ownername, owneraddrline1, owneraddrcity, owneraddrstate,
+#    owneraddrzip, situsconcat
 # ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
 
-def _first_val(row: dict, *cols) -> str:
-    for c in cols:
-        v = row.get(c, "")
-        if v:
-            return safe_str(v)
-    return ""
-
 def _socrata_lookup(owner_variant: str) -> dict:
-    global _socrata_row_logged
+    """Query Socrata using confirmed field names."""
     safe_name = owner_variant.replace("'", "''")
-
     for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
         try:
             resp = requests.get(
@@ -164,72 +186,25 @@ def _socrata_lookup(owner_variant: str) -> dict:
             rows = resp.json()
             if not (isinstance(rows, list) and rows):
                 continue
-
             r = rows[0]
 
-            # Log the complete raw row the first time we get any hit
-            if not _socrata_row_logged:
-                log.info("=" * 60)
-                log.info("FIRST SOCRATA HIT on endpoint: %s", endpoint)
-                log.info("owner searched: %r", owner_variant)
-                for k, v in sorted(r.items()):
-                    log.info("  FIELD %-35s = %r", k, str(v)[:80])
-                log.info("=" * 60)
-                _socrata_row_logged = True
+            # Confirmed field names
+            situs      = safe_str(r.get("situsconcat", ""))
+            mail_addr  = safe_str(r.get("owneraddrline1", ""))
+            mail_city  = safe_str(r.get("owneraddrcity", ""))
+            mail_state = safe_str(r.get("owneraddrstate", "")) or "TX"
+            mail_zip   = safe_str(r.get("owneraddrzip", ""))
+            # Strip extended zip (75080-1823 -> 75080)
+            if "-" in mail_zip:
+                mail_zip = mail_zip.split("-")[0]
 
-            # Use situsconcat as property address (confirmed present in ahis-pci3)
-            situs = _first_val(r, "situsconcat")
-
-            # Try every conceivable mailing address field name
-            mail_addr = _first_val(
-                r,
-                "addr_line1", "addrline1", "address1",
-                "mail_addr",  "mailaddr",  "mail_address",
-                "mailingaddress", "mailing_address",
-                "mail_street", "mailstreet",
-                "owner_address", "owneraddress",
-            )
-            mail_city = _first_val(
-                r,
-                "addr_city", "addrcity", "mail_city", "mailcity",
-                "mailingcity", "mailing_city", "owner_city",
-            )
-            mail_state = _first_val(
-                r,
-                "addr_state", "addrstate", "mail_state", "mailstate",
-                "mailingstate", "mailing_state", "owner_state",
-            ) or "TX"
-            mail_zip = _first_val(
-                r,
-                "addr_zip", "addrzip", "mail_zip", "mailzip",
-                "mailingzip", "mailing_zip", "owner_zip",
-                "zip", "zipcode",
-            )
-
-            # Parse city/state/zip out of situsconcat if individual fields empty
-            # situsconcat format is typically "123 MAIN ST ALLEN TX 75013"
-            prop_city = ""
-            prop_zip  = ""
-            prop_addr = situs
-            if situs:
-                # Try to extract zip (5 digits at end)
-                zip_m = re.search(r"\b(\d{5})\s*$", situs)
-                if zip_m:
-                    prop_zip  = zip_m.group(1)
-                    prop_addr = situs[:zip_m.start()].strip()
-                # Try to extract state (2 letters before zip)
-                st_m = re.search(r"\b([A-Z]{2})\s+\d{5}\s*$", situs)
-                if st_m:
-                    prop_city = prop_addr[:st_m.start()].strip()
-                    # Remove trailing city from prop_addr — keep street only
-                    # Actually keep the full situs as address for simplicity
-                    prop_addr = situs
+            prop_addr, prop_city, prop_state, prop_zip = _parse_situsconcat(situs)
 
             if prop_addr or mail_addr:
                 return {
                     "prop_address": prop_addr,
                     "prop_city":    prop_city,
-                    "prop_state":   "TX",
+                    "prop_state":   prop_state or "TX",
                     "prop_zip":     prop_zip,
                     "mail_address": mail_addr,
                     "mail_city":    mail_city,
@@ -243,6 +218,7 @@ def _socrata_lookup(owner_variant: str) -> dict:
 
 
 def _arcgis_lookup(owner_variant: str) -> dict:
+    """ArcGIS fallback using LIKE (upper() not supported on this server)."""
     safe_name = owner_variant.replace("'", "''")
     try:
         resp = requests.get(
@@ -268,9 +244,8 @@ def _arcgis_lookup(owner_variant: str) -> dict:
         if not features:
             return {}
         attrs = features[0].get("attributes", {})
-        log.info("  ArcGIS hit for %r attrs=%s", owner_variant[:30], attrs)
-        snum   = safe_str(attrs.get("situs_num", ""))
-        sstr   = safe_str(attrs.get("situs_street", ""))
+        snum  = safe_str(attrs.get("situs_num", ""))
+        sstr  = safe_str(attrs.get("situs_street", ""))
         return {
             "prop_address": f"{snum} {sstr}".strip(),
             "prop_city":    safe_str(attrs.get("situs_city", "")),
@@ -305,7 +280,7 @@ def lookup_parcel(owner: str) -> dict:
 
 
 # ==============================================================================
-#  CLERK PORTAL  — exactly as it was when 750 records were working
+#  CLERK PORTAL
 # ==============================================================================
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
@@ -402,9 +377,6 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
     records: list[dict] = []
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
-
-    # Do NOT bail on "no results" text — some pages have it in nav/footer
-    # Only bail if we find zero table rows AND zero cards
 
     table = soup.find("table")
     if table:
@@ -516,7 +488,6 @@ async def scrape_doc_type(
 
         log.info("  title: %s | api: %d", title, len(api_responses))
 
-        # Strategy 1: intercepted API JSON
         if api_responses:
             for body in api_responses:
                 records.extend(_extract_from_api(body, doc_type))
@@ -535,7 +506,6 @@ async def scrape_doc_type(
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
 
-        # Strategy 2: parse rendered HTML
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
