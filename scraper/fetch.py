@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Collin County, Texas — Motivated Seller Lead Scraper
-Clerk portal : https://collin.tx.publicsearch.us/
-Parcel data  : Texas Open Data Socrata (ahis-pci3) + ArcGIS fallback
-Look-back    : last 7 days
+Collin County — DIAGNOSTIC VERSION
+Runs the scraper but logs the COMPLETE raw Socrata row for the first
+owner match so we can see every available field name.
 """
 
 from __future__ import annotations
@@ -36,11 +35,9 @@ RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
 DEBUG          = True
 
-# Socrata endpoints — confirmed working from logs
 SOCRATA_OWNER = "https://data.texas.gov/resource/ahis-pci3.json"
 SOCRATA_APPR  = "https://data.texas.gov/resource/nne4-8riu.json"
 
-# ArcGIS — confirmed field names, but upper() not supported so use LIKE
 ARCGIS_URL = (
     "https://gismaps.cityofallen.org/arcgis/rest/services/"
     "ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1/query"
@@ -71,6 +68,9 @@ DATA_DIR      = ROOT / "data"
 DEBUG_DIR     = ROOT / "debug"
 for _d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
+
+# Track whether we've already logged a full Socrata row
+_socrata_logged = False
 
 
 # ==============================================================================
@@ -131,17 +131,7 @@ async def save_html(page: Page, name: str) -> None:
 
 
 # ==============================================================================
-#  PARCEL LOOKUP
-#
-#  From the logs we now know the exact Socrata column names:
-#  ahis-pci3 keys: propid, geoid, situsconcat, legaldescription, proptype,
-#                  propsubtype, propcategorycode, exempthmstdflag, ownername
-#  nne4-8riu keys: propyear, propid, geoid, proptype, propsubtype,
-#                  propcategorycode, mapid, nbhdcode, ownername
-#
-#  situsconcat = full property address as one string e.g. "123 MAIN ST ALLEN TX"
-#  We need to find the mailing address fields — they likely exist but weren't
-#  shown in the first 8 keys. We request them explicitly.
+#  PARCEL LOOKUP — diagnostic version logs the full raw row on first hit
 # ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
@@ -154,30 +144,17 @@ def _first_val(row: dict, *cols) -> str:
     return ""
 
 def _socrata_lookup(owner_variant: str) -> dict:
-    """
-    Query Socrata with the confirmed owner column 'ownername'.
-    Request all address fields explicitly so we get them even if
-    they aren't in the default first-8-key view.
-    """
+    global _socrata_logged
     safe_name = owner_variant.replace("'", "''")
-
-    # Fields to request — covers both datasets
-    select_fields = (
-        "ownername,situsconcat,situs_num,situs_street,situs_city,"
-        "situs_state,situs_zip,addr_line1,addr_line2,addr_city,"
-        "addr_state,addr_zip,mail_addr,mail_city,mail_state,mail_zip,"
-        "mailingaddress,mailingcity,mailingstate,mailingzip,"
-        "file_as_name,propid"
-    )
 
     for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
         try:
+            # NO $select — get every field the API returns by default
             resp = requests.get(
                 endpoint,
                 params={
                     "$where": f"ownername = '{safe_name}'",
                     "$limit": 1,
-                    "$select": select_fields,
                 },
                 timeout=10,
                 headers={"Accept": "application/json"},
@@ -187,59 +164,81 @@ def _socrata_lookup(owner_variant: str) -> dict:
             rows = resp.json()
             if not (isinstance(rows, list) and rows):
                 continue
-            r = rows[0]
-            log.info("  Socrata OK endpoint=%s keys=%s",
-                     endpoint.split("/")[-1], list(r.keys()))
 
-            # situsconcat is the full property address string
-            situs = _first_val(r, "situsconcat")
-            # Try to split city/state/zip off situsconcat if individual
-            # fields are empty
-            prop_addr = _first_val(r, "situs_num")
-            prop_st   = _first_val(r, "situs_street")
-            if prop_addr and prop_st:
-                prop_full = f"{prop_addr} {prop_st}"
+            r = rows[0]
+
+            # LOG THE COMPLETE RAW ROW the first time we get a hit
+            if not _socrata_logged:
+                log.info("=" * 60)
+                log.info("FIRST SOCRATA HIT — COMPLETE RAW ROW:")
+                log.info("endpoint: %s", endpoint)
+                log.info("owner searched: %r", owner_variant)
+                for k, v in r.items():
+                    log.info("  FIELD %r = %r", k, v)
+                log.info("=" * 60)
+                _socrata_logged = True
+
+            # Try every possible address field we know about
+            situs    = _first_val(r, "situsconcat", "situs_concat",
+                                   "situs_address", "fulladdress",
+                                   "site_address", "prop_address")
+            snum     = _first_val(r, "situs_num", "situsnum", "house_num",
+                                   "housenum", "street_num")
+            sstreet  = _first_val(r, "situs_street", "situsstreet",
+                                   "street_name", "streetname")
+            scity    = _first_val(r, "situs_city", "situscity",
+                                   "prop_city", "city")
+            sstate   = _first_val(r, "situs_state", "situsstate",
+                                   "prop_state", "state") or "TX"
+            szip     = _first_val(r, "situs_zip", "situszip",
+                                   "prop_zip", "zip", "zipcode")
+
+            if snum and sstreet:
+                prop_full = f"{snum} {sstreet}"
             elif situs:
                 prop_full = situs
             else:
                 prop_full = ""
 
-            mail_addr = _first_val(r, "addr_line1", "mail_addr",
-                                    "mailingaddress")
+            mail_addr  = _first_val(r, "addr_line1", "addrline1",
+                                     "mail_addr", "mailaddr",
+                                     "mailingaddress", "mailing_address",
+                                     "mail_address", "address1",
+                                     "mailaddr1", "mail_street")
+            mail_city  = _first_val(r, "addr_city", "addrcity",
+                                     "mail_city", "mailcity",
+                                     "mailingcity", "mailing_city")
+            mail_state = _first_val(r, "addr_state", "addrstate",
+                                     "mail_state", "mailstate",
+                                     "mailingstate", "mailing_state") or "TX"
+            mail_zip   = _first_val(r, "addr_zip", "addrzip",
+                                     "mail_zip", "mailzip",
+                                     "mailingzip", "mailing_zip",
+                                     "zipcode", "zip")
 
             if prop_full or mail_addr:
                 return {
                     "prop_address": prop_full,
-                    "prop_city":    _first_val(r, "situs_city"),
-                    "prop_state":   _first_val(r, "situs_state") or "TX",
-                    "prop_zip":     _first_val(r, "situs_zip"),
+                    "prop_city":    scity,
+                    "prop_state":   sstate,
+                    "prop_zip":     szip,
                     "mail_address": mail_addr,
-                    "mail_city":    _first_val(r, "addr_city", "mail_city",
-                                               "mailingcity"),
-                    "mail_state":   _first_val(r, "addr_state", "mail_state",
-                                               "mailingstate") or "TX",
-                    "mail_zip":     _first_val(r, "addr_zip", "mail_zip",
-                                               "mailingzip"),
+                    "mail_city":    mail_city,
+                    "mail_state":   mail_state,
+                    "mail_zip":     mail_zip,
                 }
         except Exception as exc:
-            log.debug("Socrata error for %r: %s", owner_variant[:40], exc)
+            log.debug("Socrata error %r: %s", owner_variant[:40], exc)
             continue
     return {}
 
 
 def _arcgis_lookup(owner_variant: str) -> dict:
-    """
-    Query ArcGIS MapServer using LIKE instead of upper() —
-    upper() causes 'Failed to execute query' on this server.
-    Names from clerk are already uppercase so exact LIKE match works.
-    """
     safe_name = owner_variant.replace("'", "''")
     try:
         resp = requests.get(
             ARCGIS_URL,
             params={
-                # Use LIKE with exact value — no upper() needed since
-                # names from the clerk portal are already uppercase
                 "where": f"file_as_name LIKE '{safe_name}'",
                 "outFields": (
                     "file_as_name,addr_line1,addr_city,addr_state,addr_zip,"
@@ -275,7 +274,7 @@ def _arcgis_lookup(owner_variant: str) -> dict:
             "mail_zip":     safe_str(attrs.get("addr_zip", "")),
         }
     except Exception as exc:
-        log.debug("ArcGIS error for %r: %s", owner_variant[:40], exc)
+        log.debug("ArcGIS error %r: %s", owner_variant[:40], exc)
         return {}
 
 
@@ -287,11 +286,9 @@ def lookup_parcel(owner: str) -> dict:
         return _parcel_cache[cache_key]
     result: dict = {}
     for variant in name_variants(owner):
-        # Socrata first — it's confirmed working
         result = _socrata_lookup(variant)
         if result.get("prop_address") or result.get("mail_address"):
             break
-        # ArcGIS fallback
         result = _arcgis_lookup(variant)
         if result.get("prop_address") or result.get("mail_address"):
             break
@@ -499,13 +496,6 @@ async def scrape_doc_type(
             for body in api_responses:
                 records.extend(_extract_from_api(body, doc_type))
             if records:
-                if DEBUG and api_responses:
-                    try:
-                        (DEBUG_DIR / f"api_{doc_type}.json").write_text(
-                            json.dumps(api_responses[0],
-                                       indent=2, default=str)[:50000])
-                    except Exception:
-                        pass
                 for _ in range(20):
                     api_responses.clear()
                     if not await _click_next(page):
@@ -750,9 +740,8 @@ async def main() -> None:
     date_from = start.strftime(fmt)
     date_to   = today.strftime(fmt)
     log.info("=" * 60)
-    log.info("Collin County Motivated Seller Scraper")
+    log.info("Collin County Motivated Seller Scraper — DIAGNOSTIC")
     log.info("Range: %s -> %s", date_from, date_to)
-    log.info("Parcel: Socrata (confirmed ownername field) + ArcGIS fallback")
     log.info("=" * 60)
     raw_records = await run_clerk_scrape(date_from, date_to)
     log.info("Raw records from clerk: %d", len(raw_records))
