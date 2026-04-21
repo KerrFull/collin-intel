@@ -1,5 +1,5 @@
 {
-  "fetched_at": "2026-04-21T17:53:34.730388+00:00",
+  "fetched_at": "2026-04-21T18:07:55.846790+00:00",
   "source": "Collin County Clerk / Collin CAD",
   "date_range": {
     "from": "4/14/2026",
@@ -18,14 +18,14 @@
       "grantee": "N/A",
       "amount": "",
       "legal": "N/A",
-      "prop_address": "420 RIDGEWOOD DR , RICHARDSON, TX 75080",
-      "prop_city": "420 RIDGEWOOD DR , RICHARDSON,",
+      "prop_address": "420 RIDGEWOOD DR",
+      "prop_city": "RICHARDSON",
       "prop_state": "TX",
       "prop_zip": "75080",
-      "mail_address": "",
-      "mail_city": "",
+      "mail_address": "420 RIDGEWOOD DR",
+      "mail_city": "RICHARDSON",
       "mail_state": "TX",
-      "mail_zip": "",
+      "mail_zip": "75080",
       "clerk_url": "",
       "flags": [
         "Lis pendens",
