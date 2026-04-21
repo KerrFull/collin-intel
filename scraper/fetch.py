@@ -1,34 +1,33 @@
+bash
+
+cat > /mnt/user-data/outputs/collin-scraper/scraper/fetch.py << 'PYEOF'
 #!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
-Clerk portal : https://collin.tx.publicsearch.us/   (Neumo SPA)
-Parcel data  : https://collincad.org/open-data-portal/
+Clerk portal : https://collin.tx.publicsearch.us/
+Parcel data  : Texas Open Data Portal (Socrata) — Collin CAD Owner Prop List
+               https://data.texas.gov/resource/ahis-pci3.json
+               Fallback: Collin CAD Appraisal Data Preliminary
+               https://data.texas.gov/resource/nne4-8riu.json
 Look-back    : last 7 days
-
-DEBUG MODE: saves screenshots to debug/ folder so you can see what
-Playwright actually renders. Check the GitHub Actions artifact after running.
 """
 
 from __future__ import annotations
 
 import asyncio
 import csv
-import io
 import json
 import logging
 import os
 import re
 import sys
-import tempfile
 import time
-import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
-from dbfread import DBF
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -41,11 +40,17 @@ log = logging.getLogger("collin_scraper")
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 CLERK_BASE    = "https://collin.tx.publicsearch.us"
-CAD_PORTAL    = "https://collincad.org/open-data-portal/"
 LOOKBACK_DAYS = 7
 RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
-DEBUG          = True   # set False to skip screenshots
+DEBUG          = True
+
+# Texas Open Data Portal — Collin CAD datasets (Socrata)
+# Primary:  Owner Prop List  (owner + mailing address)
+# Fallback: Appraisal Data Preliminary (full appraisal record)
+SOCRATA_OWNER  = "https://data.texas.gov/resource/ahis-pci3.json"
+SOCRATA_APPR   = "https://data.texas.gov/resource/nne4-8riu.json"
+SOCRATA_LIMIT  = 1   # we only need 1 match per owner lookup
 
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
@@ -70,31 +75,16 @@ ROOT          = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 DATA_DIR      = ROOT / "data"
 DEBUG_DIR     = ROOT / "debug"
-DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+for d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
+    d.mkdir(parents=True, exist_ok=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def with_retry(fn, *args, **kwargs):
-    last_exc = None
-    for attempt in range(1, RETRY_ATTEMPTS + 1):
-        try:
-            return fn(*args, **kwargs)
-        except Exception as exc:
-            last_exc = exc
-            log.warning("Attempt %d/%d failed: %s", attempt, RETRY_ATTEMPTS, exc)
-            if attempt < RETRY_ATTEMPTS:
-                time.sleep(RETRY_DELAY * attempt)
-    raise last_exc
-
-
 def safe_str(val: Any) -> str:
     return str(val).strip() if val is not None else ""
-
 
 def parse_amount(raw: str) -> float | None:
     cleaned = re.sub(r"[^\d.]", "", raw)
@@ -102,7 +92,6 @@ def parse_amount(raw: str) -> float | None:
         return float(cleaned) if cleaned else None
     except ValueError:
         return None
-
 
 def name_variants(full_name: str) -> list[str]:
     full_name = full_name.strip().upper()
@@ -113,12 +102,10 @@ def name_variants(full_name: str) -> list[str]:
         variants.add(f"{parts[-1]}, {' '.join(parts[:-1])}")
     return [v for v in variants if v]
 
-
 def _abs(href: str) -> str:
     if not href:
         return ""
     return href if href.startswith("http") else f"{CLERK_BASE}{href}"
-
 
 def _normalise_date(raw: str) -> str:
     if not raw:
@@ -130,143 +117,166 @@ def _normalise_date(raw: str) -> str:
         return f"{m.group(2)}/{m.group(3)}/{m.group(1)}"
     return raw
 
-
 async def screenshot(page: Page, name: str) -> None:
-    if not DEBUG:
-        return
-    path = DEBUG_DIR / f"{name}.png"
+    if not DEBUG: return
     try:
-        await page.screenshot(path=str(path), full_page=True)
-        log.info("  📸 Screenshot → %s", path)
+        await page.screenshot(path=str(DEBUG_DIR / f"{name}.png"), full_page=True)
+        log.info("  📸 %s.png", name)
     except Exception as exc:
         log.warning("  Screenshot failed: %s", exc)
 
-
 async def save_html(page: Page, name: str) -> None:
-    if not DEBUG:
-        return
-    path = DEBUG_DIR / f"{name}.html"
+    if not DEBUG: return
     try:
-        path.write_text(await page.content(), encoding="utf-8")
-        log.info("  📄 HTML saved → %s", path)
+        (DEBUG_DIR / f"{name}.html").write_text(await page.content(), encoding="utf-8")
+        log.info("  📄 %s.html", name)
     except Exception as exc:
         log.warning("  HTML save failed: %s", exc)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PARCEL DATA
+#  PARCEL LOOKUP — Texas Open Data Portal (Socrata)
+#
+#  We do NOT download a bulk file. Instead we query per-owner on demand.
+#  The Socrata API is free, no auth required, rate limit ~1000 req/hour.
+#  We cache results in a dict to avoid duplicate calls for same owner.
+#
+#  Datasets used (in order of preference):
+#    ahis-pci3  — "Collin CAD Owner Prop List"  (owner + site + mail)
+#    nne4-8riu  — "Collin CAD Appraisal Data - Preliminary" (fallback)
+#
+#  Column names discovered from Texas Open Data Portal documentation and
+#  TrueAutomation/Socrata standard CCAD layout.
 # ══════════════════════════════════════════════════════════════════════════════
 
-def download_parcel_dbf() -> bytes | None:
-    log.info("Fetching CAD portal: %s", CAD_PORTAL)
-    resp = requests.get(CAD_PORTAL, timeout=30)
-    resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "lxml")
+_parcel_cache: dict[str, dict] = {}
 
-    candidates: list[str] = []
-    for a in soup.find_all("a", href=True):
-        href: str = a["href"]
-        text = a.get_text(" ", strip=True).upper()
-        lo   = href.lower()
-        if any(kw in lo or kw in text
-               for kw in ["parcel", "property", "apprais", ".dbf", ".zip"]):
-            candidates.append(href)
-
-    if not candidates:
-        log.warning("No parcel download links found on CAD portal.")
-        return None
-
-    for href in candidates:
-        if not href.startswith("http"):
-            href = requests.compat.urljoin(CAD_PORTAL, href)
-        log.info("Trying parcel download: %s", href)
-        try:
-            r = requests.get(href, timeout=120, stream=True)
-            r.raise_for_status()
-            data = r.content
-            log.info("Downloaded %d bytes", len(data))
-            return data
-        except Exception as exc:
-            log.warning("Failed %s: %s", href, exc)
-    return None
+# Known possible column names for each field across CCAD Socrata datasets.
+# We try all of them and take the first non-empty value.
+_OWNER_COLS   = ["owner_name", "ownername", "owner", "own1", "own_name"]
+_SADDR_COLS   = ["situs_num", "site_num", "situs_street_num"]
+_SSTREET_COLS = ["situs_street", "site_street", "situs_str", "street_name"]
+_SCITY_COLS   = ["situs_city", "site_city", "prop_city", "city_name"]
+_SSTATE_COLS  = ["situs_state", "site_state", "state"]
+_SZIP_COLS    = ["situs_zip", "site_zip", "zip_code", "zip"]
+_MADDR_COLS   = ["mail_addr", "mailing_address", "mail_address", "addr_line1",
+                 "mail_addr1", "mailing_addr"]
+_MCITY_COLS   = ["mail_city", "mailing_city"]
+_MSTATE_COLS  = ["mail_state", "mailing_state"]
+_MZIP_COLS    = ["mail_zip", "mailing_zip", "mail_zipcode"]
 
 
-def build_parcel_lookup(raw_bytes: bytes) -> dict[str, dict]:
-    lookup: dict[str, dict] = {}
+def _first(row: dict, *cols) -> str:
+    for c in cols:
+        v = row.get(c, "")
+        if v:
+            return safe_str(v)
+    return ""
 
-    def process(dbf_bytes: bytes) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".dbf", delete=False) as tmp:
-            tmp.write(dbf_bytes)
-            tmp_path = tmp.name
-        try:
-            tbl = DBF(tmp_path, ignore_missing_memofile=True)
 
-            def col(rec: dict, *keys) -> str:
-                for k in keys:
-                    v = rec.get(k) or rec.get(k.lower())
-                    if v:
-                        return safe_str(v)
-                return ""
-
-            for rec in tbl:
-                ru = {k.upper(): v for k, v in rec.items()}
-                owner = col(ru, "OWN1", "OWNER", "OWN_NAME", "OWNERNAME")
-                if not owner:
-                    continue
-                parcel = {
-                    "prop_address": col(ru, "SITEADDR","SITE_ADDR","SITE_ADDRESS","PROPADDR","ADDRESS"),
-                    "prop_city":    col(ru, "SITECITY","SITE_CITY","PROP_CITY","CITY"),
-                    "prop_state":   col(ru, "SITESTATE","SITE_STATE","STATE") or "TX",
-                    "prop_zip":     col(ru, "SITEZIP","SITE_ZIP","PROP_ZIP","ZIP"),
-                    "mail_address": col(ru, "MAILADR1","ADDR_1","MAIL_ADDR","MAILADDR"),
-                    "mail_city":    col(ru, "MAILCITY","MAIL_CITY"),
-                    "mail_state":   col(ru, "MAILSTATE","MAIL_STATE") or "TX",
-                    "mail_zip":     col(ru, "MAILZIP","MAIL_ZIP"),
-                }
-                for variant in name_variants(owner):
-                    if variant not in lookup:
-                        lookup[variant] = parcel
-            log.info("Parcel lookup: %d owner keys", len(lookup))
-        finally:
-            os.unlink(tmp_path)
-
-    if raw_bytes[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
-            for name in [n for n in zf.namelist() if n.lower().endswith(".dbf")]:
-                process(zf.read(name))
+def _row_to_parcel(row: dict) -> dict:
+    """Convert a Socrata row to our parcel dict, trying all known column names."""
+    # Build site address from num + street, or from a combined field
+    snum    = _first(row, *_SADDR_COLS)
+    sstreet = _first(row, *_SSTREET_COLS)
+    # Some datasets have a combined situs_address field
+    saddr_combined = _first(row, "situs_address", "site_address",
+                             "prop_address", "situs_addr", "site_addr",
+                             "location_address", "address")
+    if saddr_combined:
+        prop_address = saddr_combined
+    elif snum and sstreet:
+        prop_address = f"{snum} {sstreet}"
     else:
-        process(raw_bytes)
-    return lookup
+        prop_address = snum or sstreet
+
+    return {
+        "prop_address": prop_address,
+        "prop_city":    _first(row, *_SCITY_COLS),
+        "prop_state":   _first(row, *_SSTATE_COLS) or "TX",
+        "prop_zip":     _first(row, *_SZIP_COLS),
+        "mail_address": _first(row, *_MADDR_COLS),
+        "mail_city":    _first(row, *_MCITY_COLS),
+        "mail_state":   _first(row, *_MSTATE_COLS) or "TX",
+        "mail_zip":     _first(row, *_MZIP_COLS),
+    }
 
 
-def lookup_parcel(owner: str, parcel_lookup: dict) -> dict:
+def _socrata_query(endpoint: str, owner_variant: str) -> list[dict]:
+    """
+    Query a Socrata endpoint for a single owner name variant.
+    Uses $where= upper(owner_col) = 'NAME' across all known owner column names.
+    """
+    # Escape single quotes in name
+    safe_name = owner_variant.replace("'", "''")
+    results = []
+    for col in _OWNER_COLS:
+        try:
+            resp = requests.get(
+                endpoint,
+                params={
+                    "$where": f"upper({col}) = '{safe_name}'",
+                    "$limit": SOCRATA_LIMIT,
+                },
+                timeout=8,
+                headers={"Accept": "application/json"},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    results = data
+                    break
+        except Exception:
+            pass
+    return results
+
+
+def lookup_parcel(owner: str) -> dict:
+    """
+    Look up a property address for an owner name.
+    Checks cache first, then queries Socrata, tries both datasets.
+    """
+    if not owner:
+        return {}
+
+    cache_key = owner.strip().upper()
+    if cache_key in _parcel_cache:
+        return _parcel_cache[cache_key]
+
     for variant in name_variants(owner):
-        if variant in parcel_lookup:
-            return parcel_lookup[variant]
+        # Try primary dataset first (Owner Prop List)
+        for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
+            rows = _socrata_query(endpoint, variant)
+            if rows:
+                parcel = _row_to_parcel(rows[0])
+                # Only cache and return if we actually got an address
+                if parcel.get("prop_address") or parcel.get("mail_address"):
+                    _parcel_cache[cache_key] = parcel
+                    return parcel
+
+    # Cache empty result to avoid re-querying
+    _parcel_cache[cache_key] = {}
     return {}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  CLERK PORTAL — Neumo SPA  (stealth Playwright)
+#  CLERK PORTAL — Neumo SPA  (Playwright)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
     from urllib.parse import quote
-    df = quote(date_from, safe="")
-    dt = quote(date_to,   safe="")
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
         f"&searchTerm={doc_type}"
         f"&recordedDateRange=custom"
-        f"&recordedDateFrom={df}&recordedDateTo={dt}"
+        f"&recordedDateFrom={quote(date_from, safe='')}"
+        f"&recordedDateTo={quote(date_to, safe='')}"
     )
 
 
 def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
-    records: list[dict] = []
     hits: list = []
-
     if isinstance(body, dict):
         hits = (body.get("hits") or body.get("results") or
                 body.get("records") or body.get("data") or [])
@@ -275,27 +285,24 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
     elif isinstance(body, list):
         hits = body
 
+    records = []
     for hit in hits:
-        if not isinstance(hit, dict):
-            continue
+        if not isinstance(hit, dict): continue
         src = hit.get("_source") or hit
-
         def g(*keys) -> str:
             for k in keys:
                 v = src.get(k)
                 if v: return safe_str(v)
             return ""
-
-        doc_num  = g("instrumentNumber","docNumber","instrument_number","doc_number","InstrumentNumber")
-        filed    = g("recordedDate","filedDate","recorded_date","file_date","RecordedDate")
-        owner    = g("grantor","grantors","owner","Grantor")
-        grantee  = g("grantee","grantees","Grantee")
-        legal    = g("legalDescription","legal_description","legal","Legal")
-        amount   = g("consideration","amount","Amount","Consideration")
-        dtype    = g("documentType","doc_type","DocumentType") or doc_type
-        doc_id   = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
+        doc_num = g("instrumentNumber","docNumber","instrument_number","doc_number","InstrumentNumber")
+        filed   = g("recordedDate","filedDate","recorded_date","file_date","RecordedDate")
+        owner   = g("grantor","grantors","owner","Grantor")
+        grantee = g("grantee","grantees","Grantee")
+        legal   = g("legalDescription","legal_description","legal","Legal")
+        amount  = g("consideration","amount","Amount","Consideration")
+        dtype   = g("documentType","doc_type","DocumentType") or doc_type
+        doc_id  = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
         clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
-
         if doc_num or owner:
             records.append({
                 "doc_num": doc_num, "doc_type": dtype,
@@ -357,16 +364,15 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
             link = tr.find("a", href=True)
             href = _abs(link["href"]) if link else ""
             records.append(_row_to_record(dict(zip(headers, cells)), href, doc_type))
-        if records:
-            return records
+        if records: return records
 
-    # Card layout — try many selector patterns
+    # Card layout
     for sel in [
         "[data-testid='result-item']", "[class*='record-card']",
-        "[class*='result-item']",      "[class*='result-card']",
-        "[class*='search-result']",    "li[class*='result']",
-        "div[class*='ResultItem']",    "div[class*='RecordItem']",
-        "div[class*='Hit']",           "article",
+        "[class*='result-item']", "[class*='result-card']",
+        "[class*='search-result']", "li[class*='result']",
+        "div[class*='ResultItem']", "div[class*='RecordItem']",
+        "div[class*='Hit']", "article",
     ]:
         cards = soup.select(sel)
         if cards:
@@ -380,55 +386,98 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                     if m: rec["doc_num"] = m.group(1)
                 if rec["doc_num"] or rec["owner"]:
                     records.append(rec)
-            if records:
-                return records
+            if records: return records
 
     return records
 
 
 async def _click_next(page: Page) -> bool:
-    next_btn = page.locator(
+    btn = page.locator(
         "button:has-text('Next'), [aria-label='Next page'], "
-        "[data-testid='next-page'], button[class*='next' i], "
-        "a:has-text('Next')"
+        "[data-testid='next-page'], button[class*='next' i], a:has-text('Next')"
     ).first
-    if await next_btn.count() == 0:
-        return False
-    disabled = await next_btn.get_attribute("disabled")
-    cls = (await next_btn.get_attribute("class") or "").lower()
-    if disabled is not None or "disabled" in cls:
-        return False
-    await next_btn.click()
+    if await btn.count() == 0: return False
+    disabled = await btn.get_attribute("disabled")
+    cls = (await btn.get_attribute("class") or "").lower()
+    if disabled is not None or "disabled" in cls: return False
+    await btn.click()
     await asyncio.sleep(2.5)
     return True
 
 
+async def _try_advanced_search(
+    context: BrowserContext, doc_type: str,
+    date_from: str, date_to: str,
+) -> list[dict]:
+    records: list[dict] = []
+    page: Page = await context.new_page()
+    api_responses: list[dict] = []
+
+    async def capture(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct:
+            try: api_responses.append(await response.json())
+            except Exception: pass
+
+    page.on("response", capture)
+    try:
+        await page.goto(f"{CLERK_BASE}/search/advanced", timeout=45_000, wait_until="networkidle")
+        await asyncio.sleep(3)
+
+        for sel in ["input[placeholder*='Document Type' i]", "input[name*='docType' i]",
+                    "input[id*='docType' i]", "[data-testid*='docType' i]"]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.click(); await el.fill(doc_type); await asyncio.sleep(0.5)
+                drop = page.locator(f"[role='option']:has-text('{doc_type}'), li:has-text('{doc_type}')").first
+                if await drop.count() > 0: await drop.click()
+                break
+
+        for sel in ["input[placeholder*='Start' i]", "input[name*='start' i]",
+                    "input[id*='start' i]", "input[placeholder*='From' i]"]:
+            el = page.locator(sel).first
+            if await el.count() > 0: await el.fill(date_from); break
+
+        for sel in ["input[placeholder*='End' i]", "input[name*='end' i]",
+                    "input[id*='end' i]", "input[placeholder*='To' i]"]:
+            el = page.locator(sel).first
+            if await el.count() > 0: await el.fill(date_to); break
+
+        for sel in ["button[type='submit']", "button:has-text('Search')", "input[type='submit']"]:
+            btn = page.locator(sel).first
+            if await btn.count() > 0: await btn.click(); break
+
+        await asyncio.sleep(4)
+        for body in api_responses:
+            records.extend(_extract_from_api(body, doc_type))
+        if not records:
+            records = await _parse_neumo_html(page, doc_type)
+    except Exception as exc:
+        log.warning("  Advanced search failed for %s: %s", doc_type, exc)
+    finally:
+        await page.close()
+    return records
+
+
 async def scrape_doc_type(
-    context: BrowserContext,
-    doc_type: str,
-    date_from: str,
-    date_to: str,
+    context: BrowserContext, doc_type: str,
+    date_from: str, date_to: str,
 ) -> list[dict]:
     page: Page = await context.new_page()
     records: list[dict] = []
     api_responses: list[dict] = []
 
-    async def handle_response(response):
-        url = response.url
-        ct  = response.headers.get("content-type", "")
-        if "json" in ct and any(x in url for x in ["/api/", "/search", "/result", "/record"]):
-            try:
-                body = await response.json()
-                api_responses.append(body)
-                log.debug("  [API] intercepted %s", url)
-            except Exception:
-                pass
+    async def capture(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct and any(x in response.url for x in ["/api/", "/search", "/result", "/record"]):
+            try: api_responses.append(await response.json())
+            except Exception: pass
 
-    page.on("response", handle_response)
+    page.on("response", capture)
 
     try:
         url = build_search_url(doc_type, date_from, date_to)
-        log.info("  Loading: %s", url)
+        log.info("  %s", url)
 
         for attempt in range(1, RETRY_ATTEMPTS + 1):
             try:
@@ -439,43 +488,30 @@ async def scrape_doc_type(
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
 
-        # Wait for React to render
         await asyncio.sleep(4)
 
-        # Save debug snapshot for first doc type only
         if doc_type == "LP":
-            await screenshot(page, f"search_{doc_type}")
-            await save_html(page, f"search_{doc_type}")
+            await screenshot(page, "search_LP")
+            await save_html(page, "search_LP")
 
-        # Log what we got
         title = await page.title()
-        log.info("  Page title: %s", title)
-        log.info("  API responses intercepted: %d", len(api_responses))
+        log.info("  title: %s | api responses: %d", title, len(api_responses))
 
-        # Strategy 1: API JSON
+        # Strategy 1: intercepted API JSON
         if api_responses:
             for body in api_responses:
-                extracted = _extract_from_api(body, doc_type)
-                records.extend(extracted)
-                if extracted:
-                    log.info("  [API] extracted %d records from response", len(extracted))
-
-            # Log the raw API shape for debugging
-            if DEBUG and api_responses:
-                debug_path = DEBUG_DIR / f"api_{doc_type}.json"
-                debug_path.write_text(
-                    json.dumps(api_responses[0], indent=2, default=str)[:50000],
-                    encoding="utf-8"
-                )
-
+                records.extend(_extract_from_api(body, doc_type))
             if records:
+                if DEBUG and api_responses:
+                    (DEBUG_DIR / f"api_{doc_type}.json").write_text(
+                        json.dumps(api_responses[0], indent=2, default=str)[:50000])
                 for _ in range(20):
                     api_responses.clear()
                     if not await _click_next(page): break
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
 
-        # Strategy 2: HTML parsing
+        # Strategy 2: parse HTML
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
@@ -484,7 +520,7 @@ async def scrape_doc_type(
                 if not new: break
                 records.extend(new)
 
-        # Strategy 3: Try the advanced search form directly
+        # Strategy 3: advanced search form
         if not records:
             records = await _try_advanced_search(context, doc_type, date_from, date_to)
 
@@ -492,107 +528,7 @@ async def scrape_doc_type(
 
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
-        if DEBUG:
-            await screenshot(page, f"error_{doc_type}")
-    finally:
-        await page.close()
-
-    return records
-
-
-async def _try_advanced_search(
-    context: BrowserContext,
-    doc_type: str,
-    date_from: str,
-    date_to: str,
-) -> list[dict]:
-    """
-    Fallback: navigate to /search/advanced, fill the form interactively,
-    and parse results.
-    """
-    records: list[dict] = []
-    page: Page = await context.new_page()
-    api_responses: list[dict] = []
-
-    async def handle_response(response):
-        ct = response.headers.get("content-type", "")
-        if "json" in ct:
-            try:
-                api_responses.append(await response.json())
-            except Exception:
-                pass
-
-    page.on("response", handle_response)
-
-    try:
-        log.info("  Trying advanced search for %s", doc_type)
-        await page.goto(f"{CLERK_BASE}/search/advanced", timeout=45_000,
-                        wait_until="networkidle")
-        await asyncio.sleep(3)
-
-        if doc_type == "LP":
-            await screenshot(page, "advanced_search_form")
-
-        # Fill document type
-        for sel in [
-            "input[placeholder*='Document Type' i]",
-            "input[name*='docType' i]",
-            "input[id*='docType' i]",
-            "[data-testid*='docType' i]",
-        ]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.click()
-                await el.fill(doc_type)
-                await asyncio.sleep(0.5)
-                # Pick from dropdown
-                drop = page.locator(
-                    f"[role='option']:has-text('{doc_type}'), "
-                    f"li:has-text('{doc_type}')"
-                ).first
-                if await drop.count() > 0:
-                    await drop.click()
-                break
-
-        # Date from
-        for sel in ["input[placeholder*='Start' i]", "input[name*='start' i]",
-                    "input[id*='start' i]", "input[placeholder*='From' i]"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.fill(date_from)
-                break
-
-        # Date to
-        for sel in ["input[placeholder*='End' i]", "input[name*='end' i]",
-                    "input[id*='end' i]", "input[placeholder*='To' i]"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.fill(date_to)
-                break
-
-        # Submit
-        for sel in ["button[type='submit']", "button:has-text('Search')",
-                    "input[type='submit']"]:
-            btn = page.locator(sel).first
-            if await btn.count() > 0:
-                await btn.click()
-                break
-
-        await asyncio.sleep(4)
-
-        if doc_type == "LP":
-            await screenshot(page, "advanced_search_results")
-
-        # Parse API responses
-        for body in api_responses:
-            records.extend(_extract_from_api(body, doc_type))
-
-        # Parse HTML fallback
-        if not records:
-            records = await _parse_neumo_html(page, doc_type)
-
-    except Exception as exc:
-        log.warning("  Advanced search failed for %s: %s", doc_type, exc)
+        if DEBUG: await screenshot(page, f"error_{doc_type}")
     finally:
         await page.close()
 
@@ -603,18 +539,12 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
 
     async with async_playwright() as pw:
-        # Use stealth-like settings to avoid bot detection
         browser = await pw.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-infobars",
-                "--window-size=1280,900",
-            ],
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled",
+                  "--disable-infobars", "--window-size=1280,900"],
         )
-
         context = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
@@ -622,14 +552,11 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                 "Chrome/123.0.0.0 Safari/537.36"
             ),
             viewport={"width": 1280, "height": 900},
-            # Spoof common browser properties
             extra_http_headers={
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             },
         )
-
-        # Remove webdriver flag that Playwright sets (bot detection bypass)
         await context.add_init_script("""
             Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
             Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
@@ -637,14 +564,12 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             window.chrome = {runtime: {}};
         """)
 
-        # Warm-up visit
-        log.info("Warming up session on home page…")
+        # Warm-up
         warmup = await context.new_page()
         try:
             await warmup.goto(CLERK_BASE, timeout=30_000, wait_until="networkidle")
             await asyncio.sleep(3)
             await screenshot(warmup, "homepage")
-            log.info("  Homepage title: %s", await warmup.title())
         except Exception as exc:
             log.warning("Warmup non-fatal: %s", exc)
         finally:
@@ -672,7 +597,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
 def compute_flags(rec: dict, today: datetime) -> list[str]:
     flags: list[str] = list(DOC_TYPE_MAP.get(rec["cat"], ("","",[])) [2])
-    owner_up = rec.get("owner","").upper()
+    owner_up = rec.get("owner", "").upper()
     if any(kw in owner_up for kw in
            ["LLC","INC","CORP","LTD","L.L.C","TRUST","HOLDINGS","PROPERTIES"]):
         flags.append("LLC / corp owner")
@@ -689,8 +614,7 @@ def compute_flags(rec: dict, today: datetime) -> list[str]:
 def compute_score(rec: dict, flags: list[str]) -> int:
     score = 30
     score += min(len(flags), 4) * 10
-    flag_set = set(flags)
-    if "Lis pendens" in flag_set and "Pre-foreclosure" in flag_set:
+    if "Lis pendens" in flags and "Pre-foreclosure" in flags:
         score += 20
     amount_raw = rec.get("_amount_raw")
     if amount_raw:
@@ -708,41 +632,47 @@ def compute_score(rec: dict, flags: list[str]) -> int:
 #  ASSEMBLE + SAVE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def assemble_records(raw_records: list[dict], parcel_lookup: dict, today: datetime) -> list[dict]:
+def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     assembled: list[dict] = []
     seen: set[str] = set()
+    total = len(raw_records)
 
-    for raw in raw_records:
+    for i, raw in enumerate(raw_records, 1):
         try:
-            doc_num = safe_str(raw.get("doc_num",""))
+            doc_num = safe_str(raw.get("doc_num", ""))
             if doc_num and doc_num in seen: continue
             if doc_num: seen.add(doc_num)
 
-            owner  = safe_str(raw.get("owner",""))
-            parcel = lookup_parcel(owner, parcel_lookup) if owner else {}
-            amount_str = safe_str(raw.get("amount",""))
+            owner      = safe_str(raw.get("owner", ""))
+            amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
+
+            # Live parcel lookup — show progress every 10 records
+            if i % 10 == 0:
+                log.info("  Parcel lookup progress: %d/%d (cache size: %d)",
+                         i, total, len(_parcel_cache))
+            parcel = lookup_parcel(owner)
 
             rec: dict = {
                 "doc_num":      doc_num,
-                "doc_type":     safe_str(raw.get("doc_type","")),
-                "filed":        safe_str(raw.get("filed","")),
-                "cat":          safe_str(raw.get("cat","")),
-                "cat_label":    safe_str(raw.get("cat_label","")),
+                "doc_type":     safe_str(raw.get("doc_type", "")),
+                "filed":        safe_str(raw.get("filed", "")),
+                "cat":          safe_str(raw.get("cat", "")),
+                "cat_label":    safe_str(raw.get("cat_label", "")),
                 "owner":        owner,
-                "grantee":      safe_str(raw.get("grantee","")),
+                "grantee":      safe_str(raw.get("grantee", "")),
                 "amount":       amount_str,
                 "_amount_raw":  amount_raw,
-                "legal":        safe_str(raw.get("legal","")),
-                "prop_address": parcel.get("prop_address",""),
-                "prop_city":    parcel.get("prop_city",""),
-                "prop_state":   parcel.get("prop_state","TX"),
-                "prop_zip":     parcel.get("prop_zip",""),
-                "mail_address": parcel.get("mail_address",""),
-                "mail_city":    parcel.get("mail_city",""),
-                "mail_state":   parcel.get("mail_state","TX"),
-                "mail_zip":     parcel.get("mail_zip",""),
-                "clerk_url":    safe_str(raw.get("clerk_url","")),
+                "legal":        safe_str(raw.get("legal", "")),
+                "prop_address": parcel.get("prop_address", ""),
+                "prop_city":    parcel.get("prop_city", ""),
+                "prop_state":   parcel.get("prop_state", "TX"),
+                "prop_zip":     parcel.get("prop_zip", ""),
+                "mail_address": parcel.get("mail_address", ""),
+                "mail_city":    parcel.get("mail_city", ""),
+                "mail_state":   parcel.get("mail_state", "TX"),
+                "mail_zip":     parcel.get("mail_zip", ""),
+                "clerk_url":    safe_str(raw.get("clerk_url", "")),
             }
             flags = compute_flags(rec, today)
             rec["flags"] = flags
@@ -753,14 +683,15 @@ def assemble_records(raw_records: list[dict], parcel_lookup: dict, today: dateti
             log.warning("Skipping bad record: %s", exc)
 
     assembled.sort(key=lambda r: r["score"], reverse=True)
-    log.info("Assembled %d unique records", len(assembled))
+    with_addr = sum(1 for r in assembled if r.get("prop_address"))
+    log.info("Assembled %d unique records, %d with address", len(assembled), with_addr)
     return assembled
 
 
 def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     payload = {
         "fetched_at":   datetime.now(timezone.utc).isoformat(),
-        "source":       "Collin County Clerk / Collin CAD",
+        "source":       "Collin County Clerk / Collin CAD (Texas Open Data)",
         "date_range":   {"from": date_from, "to": date_to},
         "total":        len(records),
         "with_address": sum(1 for r in records if r.get("prop_address")),
@@ -784,7 +715,7 @@ def export_ghl_csv(records: list[dict]) -> None:
     def split_name(full: str) -> tuple[str, str]:
         parts = full.strip().split()
         if not parts: return "", ""
-        if len(parts)==1: return parts[0], ""
+        if len(parts) == 1: return parts[0], ""
         return " ".join(parts[:-1]), parts[-1]
 
     with out_path.open("w", newline="", encoding="utf-8") as fh:
@@ -829,23 +760,17 @@ async def main() -> None:
     log.info("═" * 60)
     log.info("Collin County Motivated Seller Scraper")
     log.info("Range: %s → %s", date_from, date_to)
+    log.info("Parcel source: Texas Open Data Portal (live lookup)")
     log.info("═" * 60)
 
-    # Parcel lookup
-    parcel_lookup: dict = {}
-    try:
-        raw = with_retry(download_parcel_dbf)
-        if raw:
-            parcel_lookup = build_parcel_lookup(raw)
-    except Exception as exc:
-        log.error("Parcel data unavailable: %s", exc)
-
-    # Clerk scrape
+    # Scrape clerk portal
     raw_records = await run_clerk_scrape(date_from, date_to)
     log.info("Raw records from clerk: %d", len(raw_records))
 
-    # Assemble & save
-    records = assemble_records(raw_records, parcel_lookup, today)
+    # Assemble (includes live parcel lookups)
+    records = assemble_records(raw_records, today)
+
+    # Save outputs
     save_output(records, date_from, date_to)
     export_ghl_csv(records)
 
@@ -855,3 +780,8 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
+PYEOF
+echo "Done — $(wc -l < /mnt/user-data/outputs/collin-scraper/scraper/fetch.py) lines"
+Output
+
+Done — 779 lines
