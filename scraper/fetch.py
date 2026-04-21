@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Collin County — DIAGNOSTIC VERSION
-Runs the scraper but logs the COMPLETE raw Socrata row for the first
-owner match so we can see every available field name.
+Collin County, Texas — Motivated Seller Lead Scraper
+Clerk portal : https://collin.tx.publicsearch.us/
+Parcel data  : Texas Open Data Socrata ahis-pci3
+Look-back    : last 7 days
 """
 
 from __future__ import annotations
@@ -69,8 +70,8 @@ DEBUG_DIR     = ROOT / "debug"
 for _d in [DASHBOARD_DIR, DATA_DIR, DEBUG_DIR]:
     _d.mkdir(parents=True, exist_ok=True)
 
-# Track whether we've already logged a full Socrata row
-_socrata_logged = False
+# Flag so we only log the full Socrata row once
+_socrata_row_logged = False
 
 
 # ==============================================================================
@@ -131,7 +132,7 @@ async def save_html(page: Page, name: str) -> None:
 
 
 # ==============================================================================
-#  PARCEL LOOKUP — diagnostic version logs the full raw row on first hit
+#  PARCEL LOOKUP
 # ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
@@ -144,12 +145,11 @@ def _first_val(row: dict, *cols) -> str:
     return ""
 
 def _socrata_lookup(owner_variant: str) -> dict:
-    global _socrata_logged
+    global _socrata_row_logged
     safe_name = owner_variant.replace("'", "''")
 
     for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
         try:
-            # NO $select — get every field the API returns by default
             resp = requests.get(
                 endpoint,
                 params={
@@ -167,61 +167,70 @@ def _socrata_lookup(owner_variant: str) -> dict:
 
             r = rows[0]
 
-            # LOG THE COMPLETE RAW ROW the first time we get a hit
-            if not _socrata_logged:
+            # Log the complete raw row the first time we get any hit
+            if not _socrata_row_logged:
                 log.info("=" * 60)
-                log.info("FIRST SOCRATA HIT — COMPLETE RAW ROW:")
-                log.info("endpoint: %s", endpoint)
+                log.info("FIRST SOCRATA HIT on endpoint: %s", endpoint)
                 log.info("owner searched: %r", owner_variant)
-                for k, v in r.items():
-                    log.info("  FIELD %r = %r", k, v)
+                for k, v in sorted(r.items()):
+                    log.info("  FIELD %-35s = %r", k, str(v)[:80])
                 log.info("=" * 60)
-                _socrata_logged = True
+                _socrata_row_logged = True
 
-            # Try every possible address field we know about
-            situs    = _first_val(r, "situsconcat", "situs_concat",
-                                   "situs_address", "fulladdress",
-                                   "site_address", "prop_address")
-            snum     = _first_val(r, "situs_num", "situsnum", "house_num",
-                                   "housenum", "street_num")
-            sstreet  = _first_val(r, "situs_street", "situsstreet",
-                                   "street_name", "streetname")
-            scity    = _first_val(r, "situs_city", "situscity",
-                                   "prop_city", "city")
-            sstate   = _first_val(r, "situs_state", "situsstate",
-                                   "prop_state", "state") or "TX"
-            szip     = _first_val(r, "situs_zip", "situszip",
-                                   "prop_zip", "zip", "zipcode")
+            # Use situsconcat as property address (confirmed present in ahis-pci3)
+            situs = _first_val(r, "situsconcat")
 
-            if snum and sstreet:
-                prop_full = f"{snum} {sstreet}"
-            elif situs:
-                prop_full = situs
-            else:
-                prop_full = ""
+            # Try every conceivable mailing address field name
+            mail_addr = _first_val(
+                r,
+                "addr_line1", "addrline1", "address1",
+                "mail_addr",  "mailaddr",  "mail_address",
+                "mailingaddress", "mailing_address",
+                "mail_street", "mailstreet",
+                "owner_address", "owneraddress",
+            )
+            mail_city = _first_val(
+                r,
+                "addr_city", "addrcity", "mail_city", "mailcity",
+                "mailingcity", "mailing_city", "owner_city",
+            )
+            mail_state = _first_val(
+                r,
+                "addr_state", "addrstate", "mail_state", "mailstate",
+                "mailingstate", "mailing_state", "owner_state",
+            ) or "TX"
+            mail_zip = _first_val(
+                r,
+                "addr_zip", "addrzip", "mail_zip", "mailzip",
+                "mailingzip", "mailing_zip", "owner_zip",
+                "zip", "zipcode",
+            )
 
-            mail_addr  = _first_val(r, "addr_line1", "addrline1",
-                                     "mail_addr", "mailaddr",
-                                     "mailingaddress", "mailing_address",
-                                     "mail_address", "address1",
-                                     "mailaddr1", "mail_street")
-            mail_city  = _first_val(r, "addr_city", "addrcity",
-                                     "mail_city", "mailcity",
-                                     "mailingcity", "mailing_city")
-            mail_state = _first_val(r, "addr_state", "addrstate",
-                                     "mail_state", "mailstate",
-                                     "mailingstate", "mailing_state") or "TX"
-            mail_zip   = _first_val(r, "addr_zip", "addrzip",
-                                     "mail_zip", "mailzip",
-                                     "mailingzip", "mailing_zip",
-                                     "zipcode", "zip")
+            # Parse city/state/zip out of situsconcat if individual fields empty
+            # situsconcat format is typically "123 MAIN ST ALLEN TX 75013"
+            prop_city = ""
+            prop_zip  = ""
+            prop_addr = situs
+            if situs:
+                # Try to extract zip (5 digits at end)
+                zip_m = re.search(r"\b(\d{5})\s*$", situs)
+                if zip_m:
+                    prop_zip  = zip_m.group(1)
+                    prop_addr = situs[:zip_m.start()].strip()
+                # Try to extract state (2 letters before zip)
+                st_m = re.search(r"\b([A-Z]{2})\s+\d{5}\s*$", situs)
+                if st_m:
+                    prop_city = prop_addr[:st_m.start()].strip()
+                    # Remove trailing city from prop_addr — keep street only
+                    # Actually keep the full situs as address for simplicity
+                    prop_addr = situs
 
-            if prop_full or mail_addr:
+            if prop_addr or mail_addr:
                 return {
-                    "prop_address": prop_full,
-                    "prop_city":    scity,
-                    "prop_state":   sstate,
-                    "prop_zip":     szip,
+                    "prop_address": prop_addr,
+                    "prop_city":    prop_city,
+                    "prop_state":   "TX",
+                    "prop_zip":     prop_zip,
                     "mail_address": mail_addr,
                     "mail_city":    mail_city,
                     "mail_state":   mail_state,
@@ -259,12 +268,11 @@ def _arcgis_lookup(owner_variant: str) -> dict:
         if not features:
             return {}
         attrs = features[0].get("attributes", {})
-        log.info("  ArcGIS hit! attrs=%s", attrs)
-        situs_num    = safe_str(attrs.get("situs_num", ""))
-        situs_street = safe_str(attrs.get("situs_street", ""))
-        prop_address = f"{situs_num} {situs_street}".strip()
+        log.info("  ArcGIS hit for %r attrs=%s", owner_variant[:30], attrs)
+        snum   = safe_str(attrs.get("situs_num", ""))
+        sstr   = safe_str(attrs.get("situs_street", ""))
         return {
-            "prop_address": prop_address,
+            "prop_address": f"{snum} {sstr}".strip(),
             "prop_city":    safe_str(attrs.get("situs_city", "")),
             "prop_state":   "TX",
             "prop_zip":     "",
@@ -297,7 +305,7 @@ def lookup_parcel(owner: str) -> dict:
 
 
 # ==============================================================================
-#  CLERK PORTAL
+#  CLERK PORTAL  — exactly as it was when 750 records were working
 # ==============================================================================
 
 def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
@@ -376,12 +384,16 @@ def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
                 return safe_str(v)
         return ""
     return {
-        "doc_num":   g("document number", "doc number", "instrument", "doc #", "doc_num"),
-        "doc_type":  g("document type", "type", "doc type", "documenttype") or doc_type,
-        "filed":     _normalise_date(g("filed", "file date", "recorded", "date filed", "date")),
+        "doc_num":   g("document number", "doc number", "instrument",
+                       "doc #", "doc_num"),
+        "doc_type":  g("document type", "type", "doc type",
+                       "documenttype") or doc_type,
+        "filed":     _normalise_date(g("filed", "file date", "recorded",
+                                       "date filed", "date")),
         "owner":     g("grantor", "owner", "grantors"),
         "grantee":   g("grantee", "grantees"),
-        "legal":     g("legal", "legal description", "description", "legaldescription"),
+        "legal":     g("legal", "legal description", "description",
+                       "legaldescription"),
         "amount":    g("amount", "consideration", "debt", "lien amount"),
         "clerk_url": href,
     }
@@ -390,9 +402,10 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
     records: list[dict] = []
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
-    if soup.find(string=re.compile(
-            r"no results|0 results|nothing found|no records", re.I)):
-        return records
+
+    # Do NOT bail on "no results" text — some pages have it in nav/footer
+    # Only bail if we find zero table rows AND zero cards
+
     table = soup.find("table")
     if table:
         headers = [th.get_text(" ", strip=True).lower()
@@ -407,12 +420,18 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                 dict(zip(headers, cells)), href, doc_type))
         if records:
             return records
+
     for sel in [
-        "[data-testid='result-item']", "[class*='record-card']",
-        "[class*='result-item']",      "[class*='result-card']",
-        "[class*='search-result']",    "li[class*='result']",
-        "div[class*='ResultItem']",    "div[class*='RecordItem']",
-        "div[class*='Hit']",           "article",
+        "[data-testid='result-item']",
+        "[class*='record-card']",
+        "[class*='result-item']",
+        "[class*='result-card']",
+        "[class*='search-result']",
+        "li[class*='result']",
+        "div[class*='ResultItem']",
+        "div[class*='RecordItem']",
+        "div[class*='Hit']",
+        "article",
     ]:
         cards = soup.select(sel)
         if cards:
@@ -429,6 +448,7 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                     records.append(rec)
             if records:
                 return records
+
     return records
 
 async def _click_next(page: Page) -> bool:
@@ -480,6 +500,7 @@ async def scrape_doc_type(
                     raise
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
+
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
@@ -488,20 +509,33 @@ async def scrape_doc_type(
                 title = await page.title()
                 if "Loading" not in title:
                     break
+
         if doc_type == "LP":
             await screenshot(page, "search_LP")
             await save_html(page, "search_LP")
+
         log.info("  title: %s | api: %d", title, len(api_responses))
+
+        # Strategy 1: intercepted API JSON
         if api_responses:
             for body in api_responses:
                 records.extend(_extract_from_api(body, doc_type))
             if records:
+                if DEBUG and api_responses:
+                    try:
+                        (DEBUG_DIR / f"api_{doc_type}.json").write_text(
+                            json.dumps(api_responses[0],
+                                       indent=2, default=str)[:50000])
+                    except Exception:
+                        pass
                 for _ in range(20):
                     api_responses.clear()
                     if not await _click_next(page):
                         break
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
+
+        # Strategy 2: parse rendered HTML
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
@@ -511,7 +545,9 @@ async def scrape_doc_type(
                 if not new:
                     break
                 records.extend(new)
+
         log.info("  -> %d records for %s", len(records), doc_type)
+
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
         if DEBUG:
@@ -740,7 +776,7 @@ async def main() -> None:
     date_from = start.strftime(fmt)
     date_to   = today.strftime(fmt)
     log.info("=" * 60)
-    log.info("Collin County Motivated Seller Scraper — DIAGNOSTIC")
+    log.info("Collin County Motivated Seller Scraper")
     log.info("Range: %s -> %s", date_from, date_to)
     log.info("=" * 60)
     raw_records = await run_clerk_scrape(date_from, date_to)
