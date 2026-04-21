@@ -784,4 +784,4 @@ PYEOF
 echo "Done — $(wc -l < /mnt/user-data/outputs/collin-scraper/scraper/fetch.py) lines"
 Output
 
-Done — 779 lines
+
