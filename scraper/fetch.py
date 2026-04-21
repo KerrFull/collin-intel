@@ -3,9 +3,6 @@
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
 Parcel data  : ArcGIS MapServer (CCAD Tax Parcels) — public, no auth
-               https://gismaps.cityofallen.org/arcgis/rest/services/
-               ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1
-               Fallback: Texas Open Data Socrata (ahis-pci3 / nne4-8riu)
 Look-back    : last 7 days
 """
 
@@ -17,7 +14,6 @@ import json
 import logging
 import re
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -164,13 +160,20 @@ def _arcgis_lookup(owner_variant: str) -> dict:
             },
             timeout=10,
         )
+        log.info("  ArcGIS status=%d for %r", resp.status_code, owner_variant[:40])
         if resp.status_code != 200:
+            log.warning("  ArcGIS non-200: %s", resp.text[:300])
             return {}
         data = resp.json()
+        if data.get("error"):
+            log.warning("  ArcGIS error: %s", data["error"])
+            return {}
         features = data.get("features", [])
+        log.info("  ArcGIS features=%d", len(features))
         if not features:
             return {}
         attrs = features[0].get("attributes", {})
+        log.info("  ArcGIS attrs: %s", attrs)
         situs_num    = safe_str(attrs.get("situs_num", ""))
         situs_street = safe_str(attrs.get("situs_street", ""))
         prop_address = f"{situs_num} {situs_street}".strip()
@@ -185,7 +188,7 @@ def _arcgis_lookup(owner_variant: str) -> dict:
             "mail_zip":     safe_str(attrs.get("addr_zip", "")),
         }
     except Exception as exc:
-        log.debug("ArcGIS lookup failed for %r: %s", owner_variant, exc)
+        log.warning("  ArcGIS exception for %r: %s", owner_variant[:40], exc)
         return {}
 
 def _socrata_lookup(owner_variant: str) -> dict:
@@ -208,6 +211,8 @@ def _socrata_lookup(owner_variant: str) -> dict:
                 if not (isinstance(rows, list) and rows):
                     continue
                 r = rows[0]
+                log.info("  Socrata hit on col=%s endpoint=%s keys=%s",
+                         col, endpoint.split("/")[-1], list(r.keys())[:8])
                 snum    = _first_val(r, "situs_num")
                 sstreet = _first_val(r, "situs_street", "situs_str")
                 prop_address = f"{snum} {sstreet}".strip()
@@ -280,13 +285,13 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
                 if v:
                     return safe_str(v)
             return ""
-        doc_num   = g("instrumentNumber","docNumber","instrument_number","InstrumentNumber")
-        filed     = g("recordedDate","filedDate","recorded_date","RecordedDate")
-        owner     = g("grantor","grantors","owner","Grantor")
-        grantee   = g("grantee","grantees","Grantee")
-        legal     = g("legalDescription","legal_description","legal","Legal")
-        amount    = g("consideration","amount","Amount","Consideration")
-        dtype     = g("documentType","doc_type","DocumentType") or doc_type
+        doc_num   = g("instrumentNumber", "docNumber", "instrument_number", "InstrumentNumber")
+        filed     = g("recordedDate", "filedDate", "recorded_date", "RecordedDate")
+        owner     = g("grantor", "grantors", "owner", "Grantor")
+        grantee   = g("grantee", "grantees", "Grantee")
+        legal     = g("legalDescription", "legal_description", "legal", "Legal")
+        amount    = g("consideration", "amount", "Amount", "Consideration")
+        dtype     = g("documentType", "doc_type", "DocumentType") or doc_type
         doc_id    = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
         clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
         if doc_num or owner:
@@ -326,13 +331,13 @@ def _row_to_record(row: dict, href: str, doc_type: str) -> dict:
                 return safe_str(v)
         return ""
     return {
-        "doc_num":   g("document number","doc number","instrument","doc #","doc_num"),
-        "doc_type":  g("document type","type","doc type","documenttype") or doc_type,
-        "filed":     _normalise_date(g("filed","file date","recorded","date filed","date")),
-        "owner":     g("grantor","owner","grantors"),
-        "grantee":   g("grantee","grantees"),
-        "legal":     g("legal","legal description","description","legaldescription"),
-        "amount":    g("amount","consideration","debt","lien amount"),
+        "doc_num":   g("document number", "doc number", "instrument", "doc #", "doc_num"),
+        "doc_type":  g("document type", "type", "doc type", "documenttype") or doc_type,
+        "filed":     _normalise_date(g("filed", "file date", "recorded", "date filed", "date")),
+        "owner":     g("grantor", "owner", "grantors"),
+        "grantee":   g("grantee", "grantees"),
+        "legal":     g("legal", "legal description", "description", "legaldescription"),
+        "amount":    g("amount", "consideration", "debt", "lien amount"),
         "clerk_url": href,
     }
 
@@ -433,7 +438,7 @@ async def scrape_doc_type(
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
-            for _ in range(15):
+            for _ in range(25):
                 await asyncio.sleep(1)
                 title = await page.title()
                 if "Loading" not in title:
