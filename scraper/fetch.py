@@ -515,25 +515,25 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         page.on("response", capture)
         try:
-            url = build_search_url(date_from, date_to, "LP")
-            log.info("Fetching all records: %s", url)
-            for attempt in range(1, RETRY_ATTEMPTS + 1):
-                try:
-                    await page.goto(url, timeout=60_000, wait_until="networkidle")
-                    break
-                except Exception as exc:
-                    if attempt == RETRY_ATTEMPTS:
-                        raise
-                    await asyncio.sleep(RETRY_DELAY)
+             url = build_search_url(date_from, date_to, "LP")
+        log.info("Fetching all records: %s", url)
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                await page.goto(url, timeout=60_000, wait_until="networkidle")
+                break
+            except Exception as exc:
+                if attempt == RETRY_ATTEMPTS:
+                    raise
+                await asyncio.sleep(RETRY_DELAY)
 
-            await asyncio.sleep(4)
-            title = await page.title()
-            if "Loading" in title:
-                for _ in range(35):
-                    await asyncio.sleep(1)
-                    title = await page.title()
-                    if "Loading" not in title:
-                        break
+        await asyncio.sleep(4)
+        title = await page.title()
+        if "Loading" in title:
+            for _ in range(35):
+                await asyncio.sleep(1)
+                title = await page.title()
+                if "Loading" not in title:
+                    break
 
             await screenshot(page, "search_all")
             log.info("Title: %s | api: %d", title, len(api_responses))
