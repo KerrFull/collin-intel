@@ -719,11 +719,20 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
         try:
             doc_num = safe_str(raw.get("doc_num", ""))
 
-            # Only deduplicate when we have a real doc number
+           # Only deduplicate when we have a real doc number
             if doc_num:
                 if doc_num in seen_doc_nums:
                     continue
                 seen_doc_nums.add(doc_num)
+            else:
+                fallback_key = (
+                    safe_str(raw.get("owner", "")).upper(),
+                    safe_str(raw.get("filed", "")),
+                    safe_str(raw.get("cat", "")),
+                )
+                if fallback_key in seen_doc_nums:
+                    continue
+                seen_doc_nums.add(fallback_key)
 
             owner      = safe_str(raw.get("owner", ""))
             amount_str = safe_str(raw.get("amount", ""))
