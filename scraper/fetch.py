@@ -321,11 +321,10 @@ def lookup_parcel(owner: str) -> dict:
 #  CLERK PORTAL
 # ==============================================================================
 
-def build_search_url(doc_type: str, date_from: str, date_to: str) -> str:
+def build_search_url(date_from: str, date_to: str) -> str:
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
-        f"&searchTerm={doc_type}"
         f"&recordedDateRange=custom"
         f"&recordedDateFrom={quote(date_from, safe='')}"
         f"&recordedDateTo={quote(date_to, safe='')}"
