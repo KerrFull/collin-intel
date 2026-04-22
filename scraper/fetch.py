@@ -597,19 +597,99 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             log.warning("Warmup non-fatal: %s", exc)
         finally:
             await warmup.close()
-        for code in DOC_TYPE_MAP:
-            try:
-                recs = await scrape_doc_type(
-                    context, code, date_from, date_to)
-                for r in recs:
-                    r["cat"]       = code
-                    r["cat_label"] = DOC_TYPE_MAP[code][1]
-                all_records.extend(recs)
-            except Exception as exc:
-                log.error("Failed %s: %s", code, exc)
-            await asyncio.sleep(2)
+
+        # Fetch ALL records for the date range in one search
+        # then filter by doc type locally
+        page: Page = await context.new_page()
+        api_responses: list[dict] = []
+
+        async def capture(response):
+            ct = response.headers.get("content-type", "")
+            if "json" in ct and any(x in response.url
+                                    for x in ["/api/", "/search",
+                                              "/result", "/record"]):
+                try:
+                    api_responses.append(await response.json())
+                except Exception:
+                    pass
+
+        page.on("response", capture)
+        try:
+            url = build_search_url(date_from, date_to)
+            log.info("Fetching all records: %s", url)
+            for attempt in range(1, RETRY_ATTEMPTS + 1):
+                try:
+                    await page.goto(url, timeout=60_000,
+                                    wait_until="networkidle")
+                    break
+                except Exception as exc:
+                    if attempt == RETRY_ATTEMPTS:
+                        raise
+                    await asyncio.sleep(RETRY_DELAY)
+
+            await asyncio.sleep(4)
+            title = await page.title()
+            if "Loading" in title:
+                for _ in range(35):
+                    await asyncio.sleep(1)
+                    title = await page.title()
+                    if "Loading" not in title:
+                        break
+
+            await screenshot(page, "search_all")
+            await save_html(page, "search_all")
+            log.info("Title: %s | api: %d", title, len(api_responses))
+
+            # Paginate through ALL results
+            if api_responses:
+                for body in api_responses:
+                    all_records.extend(_extract_from_api_untyped(body))
+                if all_records:
+                    for _ in range(200):  # up to 200 pages
+                        api_responses.clear()
+                        if not await _click_next(page):
+                            break
+                        await asyncio.sleep(2)
+                        for body in api_responses:
+                            all_records.extend(_extract_from_api_untyped(body))
+
+            if not all_records:
+                all_records = await _parse_neumo_html_untyped(page)
+                for _ in range(200):
+                    if not await _click_next(page):
+                        break
+                    new = await _parse_neumo_html_untyped(page)
+                    if not new:
+                        break
+                    all_records.extend(new)
+
+            log.info("Total raw records: %d", len(all_records))
+
+        except Exception as exc:
+            log.error("Clerk scrape error: %s", exc)
+            await screenshot(page, "error_main")
+        finally:
+            await page.close()
+
         await browser.close()
-    return all_records
+
+    # Filter to only our target doc types
+    doc_type_keys = set(DOC_TYPE_MAP.keys())
+    filtered = []
+    for r in all_records:
+        dt = r.get("doc_type", "").upper().strip()
+        if dt in doc_type_keys:
+            r["cat"]       = dt
+            r["cat_label"] = DOC_TYPE_MAP[dt][1]
+            filtered.append(r)
+        else:
+            # Include anyway with generic cat so we don't miss records
+            r["cat"]       = dt
+            r["cat_label"] = dt
+            filtered.append(r)
+
+    log.info("After doc type filter: %d records", len(filtered))
+    return filtered
 
 
 # ==============================================================================
