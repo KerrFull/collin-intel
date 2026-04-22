@@ -558,7 +558,7 @@ async def scrape_doc_type(
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
-            for _ in range(25):
+            for _ in range(35):
                 await asyncio.sleep(1)
                 title = await page.title()
                 if "Loading" not in title:
