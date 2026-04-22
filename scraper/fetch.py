@@ -1,5 +1,3 @@
-The page stayed on "Loading Search Results" — the portal requires a search term to return results. A blank search returns nothing.
-The fix is simple: go back to searching by doc type (which was working and returning 50 records each), but now we know the portal returns the same 50 records regardless of the search term. So we only need to search once with any term, paginate through ALL pages, and we'll get all the records. The doc type in each record tells us what type it is.
 python#!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
