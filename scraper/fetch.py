@@ -368,6 +368,30 @@ def _extract_from_api(body: Any, doc_type: str) -> list[dict]:
             })
     return records
 
+def _extract_from_api_untyped(body: Any) -> list[dict]:
+    return _extract_from_api(body, "")
+
+async def _parse_neumo_html_untyped(page: Page) -> list[dict]:
+    return await _parse_neumo_html(page, "")
+            return ""
+        doc_num   = g("instrumentNumber", "docNumber", "instrument_number", "InstrumentNumber")
+        filed     = g("recordedDate", "filedDate", "recorded_date", "RecordedDate")
+        owner     = g("grantor", "grantors", "owner", "Grantor")
+        grantee   = g("grantee", "grantees", "Grantee")
+        legal     = g("legalDescription", "legal_description", "legal", "Legal")
+        amount    = g("consideration", "amount", "Amount", "Consideration")
+        dtype     = g("documentType", "doc_type", "DocumentType") or doc_type
+        doc_id    = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
+        clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
+        if doc_num or owner:
+            records.append({
+                "doc_num": doc_num, "doc_type": dtype,
+                "filed": _normalise_date(filed), "owner": owner,
+                "grantee": grantee, "legal": legal,
+                "amount": amount, "clerk_url": clerk_url,
+            })
+    return records
+
 def _text_to_row(text: str) -> dict[str, str]:
     row: dict[str, str] = {}
     m = re.search(r"(\d{4}-\d{5,}|\d{8,})", text)
