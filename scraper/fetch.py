@@ -712,7 +712,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     # Deduplicate by doc_num only when doc_num is non-empty
     # Records with empty doc_num are all kept (they are real records,
     # just the HTML parser didn't capture the doc number)
-   seen_doc_nums: set = set()
+    seen_doc_nums: set = set()
     total = len(raw_records)
 
     for i, raw in enumerate(raw_records, 1):
