@@ -1,4 +1,6 @@
-#!/usr/bin/env python3
+The page stayed on "Loading Search Results" — the portal requires a search term to return results. A blank search returns nothing.
+The fix is simple: go back to searching by doc type (which was working and returning 50 records each), but now we know the portal returns the same 50 records regardless of the search term. So we only need to search once with any term, paginate through ALL pages, and we'll get all the records. The doc type in each record tells us what type it is.
+python#!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
@@ -306,14 +308,16 @@ def lookup_parcel(owner: str) -> dict:
 
 # ==============================================================================
 #  CLERK PORTAL
+#  The portal ignores searchTerm and returns the same results regardless.
+#  So we search once with a common term that always returns results,
+#  paginate through ALL pages, and tag records by their doc_type field.
 # ==============================================================================
 
-def build_search_url(date_from: str, date_to: str) -> str:
-    """Fetch ALL records for the date range — no doc type filter.
-    The portal ignores searchTerm so we get everything and filter locally."""
+def build_search_url(date_from: str, date_to: str, search_term: str = "LP") -> str:
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
+        f"&searchTerm={search_term}"
         f"&recordedDateRange=custom"
         f"&recordedDateFrom={quote(date_from, safe='')}"
         f"&recordedDateTo={quote(date_to, safe='')}"
@@ -496,6 +500,8 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
         finally:
             await warmup.close()
 
+        # Search once with "LP" — portal ignores the term and returns all
+        # records for the date range. We paginate through everything.
         page: Page = await context.new_page()
         api_responses: list[dict] = []
 
@@ -511,7 +517,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         page.on("response", capture)
         try:
-            url = build_search_url(date_from, date_to)
+            url = build_search_url(date_from, date_to, "LP")
             log.info("Fetching all records: %s", url)
             for attempt in range(1, RETRY_ATTEMPTS + 1):
                 try:
@@ -532,7 +538,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                         break
 
             await screenshot(page, "search_all")
-            await save_html(page, "search_all")
             log.info("Title: %s | api: %d", title, len(api_responses))
 
             if api_responses:
@@ -557,7 +562,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                         break
                     all_records.extend(new)
 
-            log.info("Total raw records: %d", len(all_records))
+            log.info("Total raw records before filter: %d", len(all_records))
 
         except Exception as exc:
             log.error("Clerk scrape error: %s", exc)
@@ -586,7 +591,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 # ==============================================================================
 
 def compute_flags(rec: dict, today: datetime) -> list[str]:
-    flags: list[str] = list(DOC_TYPE_MAP.get(rec.get("cat",""), ("", "", []))[2])
+    flags: list[str] = list(DOC_TYPE_MAP.get(rec.get("cat", ""), ("", "", []))[2])
     owner_up = rec.get("owner", "").upper()
     if any(kw in owner_up for kw in
            ["LLC", "INC", "CORP", "LTD", "L.L.C",
@@ -646,7 +651,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
 
-            if i % 20 == 0:
+            if i % 10 == 0:
                 log.info("  Parcel lookup %d/%d (cache: %d)",
                          i, total, len(_parcel_cache))
             parcel = lookup_parcel(owner)
