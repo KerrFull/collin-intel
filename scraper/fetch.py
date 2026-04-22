@@ -568,8 +568,7 @@ async def scrape_doc_type(
                 if not new:
                     break
                 records.extend(new)
-        sample_nums = [r.get("doc_num","")[:15] for r in records[:3]]
-        log.info("  -> %d records for %s | samples: %s", len(records), doc_type, sample_nums)
+        log.info("  -> %d records for %s", len(records), doc_type)
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
         if DEBUG:
