@@ -306,16 +306,13 @@ def lookup_parcel(owner: str) -> dict:
 
 # ==============================================================================
 #  CLERK PORTAL
-#  The portal ignores searchTerm and returns the same results regardless.
-#  So we search once with a common term that always returns results,
-#  paginate through ALL pages, and tag records by their doc_type field.
 # ==============================================================================
 
-def build_search_url(date_from: str, date_to: str, search_term: str = "LP") -> str:
+def build_search_url(date_from: str, date_to: str, term: str) -> str:
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
-        f"&searchTerm={search_term}"
+        f"&searchTerm={term}"
         f"&recordedDateRange=custom"
         f"&recordedDateFrom={quote(date_from, safe='')}"
         f"&recordedDateTo={quote(date_to, safe='')}"
@@ -454,6 +451,31 @@ async def _click_next(page: Page) -> bool:
     await asyncio.sleep(2.5)
     return True
 
+async def _load_search(page: Page, date_from: str, date_to: str) -> bool:
+    """Try multiple search terms until one loads. Returns True on success."""
+    search_terms = ["LP", "RELLP", "JUD", "CCJ", "LN", "NOC", "PRO", "LNHOA"]
+    for term in search_terms:
+        url = build_search_url(date_from, date_to, term)
+        log.info("Trying term %s ...", term)
+        try:
+            await page.goto(url, timeout=60_000, wait_until="networkidle")
+        except Exception as exc:
+            log.warning("  goto failed for %s: %s", term, exc)
+            continue
+        await asyncio.sleep(4)
+        title = await page.title()
+        if "Loading" in title:
+            for _ in range(40):
+                await asyncio.sleep(1)
+                title = await page.title()
+                if "Loading" not in title:
+                    break
+        if "Loading" not in title:
+            log.info("  Loaded with term %s | title: %s", term, title)
+            return True
+        log.warning("  Still loading after wait, trying next term")
+    return False
+
 async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
     async with async_playwright() as pw:
@@ -498,8 +520,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
         finally:
             await warmup.close()
 
-        # Search once with "LP" — portal ignores the term and returns all
-        # records for the date range. We paginate through everything.
         page: Page = await context.new_page()
         api_responses: list[dict] = []
 
@@ -515,52 +535,36 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         page.on("response", capture)
         try:
-             url = build_search_url(date_from, date_to, "LP")
-        log.info("Fetching all records: %s", url)
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
-            try:
-                await page.goto(url, timeout=60_000, wait_until="networkidle")
-                break
-            except Exception as exc:
-                if attempt == RETRY_ATTEMPTS:
-                    raise
-                await asyncio.sleep(RETRY_DELAY)
+            loaded = await _load_search(page, date_from, date_to)
+            if not loaded:
+                log.error("Could not load any search results page")
+            else:
+                await screenshot(page, "search_all")
+                log.info("api responses: %d", len(api_responses))
 
-        await asyncio.sleep(4)
-        title = await page.title()
-        if "Loading" in title:
-            for _ in range(35):
-                await asyncio.sleep(1)
-                title = await page.title()
-                if "Loading" not in title:
-                    break
+                if api_responses:
+                    for body in api_responses:
+                        all_records.extend(_extract_from_api(body))
+                    if all_records:
+                        for _ in range(200):
+                            api_responses.clear()
+                            if not await _click_next(page):
+                                break
+                            await asyncio.sleep(2)
+                            for body in api_responses:
+                                all_records.extend(_extract_from_api(body))
 
-            await screenshot(page, "search_all")
-            log.info("Title: %s | api: %d", title, len(api_responses))
-
-            if api_responses:
-                for body in api_responses:
-                    all_records.extend(_extract_from_api(body))
-                if all_records:
+                if not all_records:
+                    all_records = await _parse_neumo_html(page)
                     for _ in range(200):
-                        api_responses.clear()
                         if not await _click_next(page):
                             break
-                        await asyncio.sleep(2)
-                        for body in api_responses:
-                            all_records.extend(_extract_from_api(body))
+                        new = await _parse_neumo_html(page)
+                        if not new:
+                            break
+                        all_records.extend(new)
 
-            if not all_records:
-                all_records = await _parse_neumo_html(page)
-                for _ in range(200):
-                    if not await _click_next(page):
-                        break
-                    new = await _parse_neumo_html(page)
-                    if not new:
-                        break
-                    all_records.extend(new)
-
-            log.info("Total raw records before filter: %d", len(all_records))
+                log.info("Total raw records: %d", len(all_records))
 
         except Exception as exc:
             log.error("Clerk scrape error: %s", exc)
@@ -570,7 +574,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         await browser.close()
 
-    # Tag each record with its doc type category
     for r in all_records:
         dt = r.get("doc_type", "").upper().strip()
         if dt in DOC_TYPE_MAP:
