@@ -719,7 +719,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
         try:
             doc_num = safe_str(raw.get("doc_num", ""))
 
-           # Only deduplicate when we have a real doc number
+          # Only deduplicate when we have a real doc number
             if doc_num:
                 if doc_num in seen_doc_nums:
                     continue
