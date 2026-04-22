@@ -88,26 +88,16 @@ def parse_amount(raw: str) -> float | None:
         return None
 
 def name_variants(full_name: str) -> list[str]:
-    """
-    Generate search variants for an owner name.
-    Clerk stores names as LASTNAME FIRSTNAME or FIRSTNAME LASTNAME.
-    Socrata ownername field uses FIRSTNAME LASTNAME order typically,
-    but also stores as LASTNAME FIRSTNAME. We try both plus comma form.
-    """
     full_name = full_name.strip().upper()
     variants: list[str] = [full_name]
     parts = full_name.split()
     if len(parts) >= 2:
-        # Flip: if input is "SMITH JOHN" try "JOHN SMITH" and vice versa
         flipped = f"{' '.join(parts[1:])} {parts[0]}"
         if flipped not in variants:
             variants.append(flipped)
-        # Comma form: "SMITH, JOHN"
         comma = f"{parts[0]}, {' '.join(parts[1:])}"
         if comma not in variants:
             variants.append(comma)
-        # Last word first: "JOHN SMITH" -> "SMITH JOHN" already covered
-        # Also try last, rest: "SMITH JOHN W" -> "JOHN W SMITH"
         if len(parts) >= 3:
             alt = f"{' '.join(parts[1:])} {parts[0]}"
             if alt not in variants:
@@ -130,19 +120,13 @@ def _normalise_date(raw: str) -> str:
     return raw
 
 def _parse_situsconcat(situs: str) -> tuple[str, str, str, str]:
-    """
-    Parse '420 RIDGEWOOD DR , RICHARDSON, TX 75080'
-    into (street_address, city, state, zip).
-    """
     situs = situs.strip()
     zip_m = re.search(r"\b(\d{5})(?:-\d{4})?\s*$", situs)
     prop_zip = zip_m.group(1) if zip_m else ""
     remainder = situs[:zip_m.start()].strip(" ,") if zip_m else situs
-
     st_m = re.search(r",?\s*([A-Z]{2})\s*$", remainder)
     prop_state = st_m.group(1) if st_m else "TX"
     remainder = remainder[:st_m.start()].strip(" ,") if st_m else remainder
-
     parts = remainder.rsplit(",", 1)
     if len(parts) == 2:
         prop_addr = parts[0].strip()
@@ -150,7 +134,6 @@ def _parse_situsconcat(situs: str) -> tuple[str, str, str, str]:
     else:
         prop_addr = remainder.strip()
         prop_city = ""
-
     return prop_addr, prop_city, prop_state, prop_zip
 
 async def screenshot(page: Page, name: str) -> None:
@@ -174,9 +157,6 @@ async def save_html(page: Page, name: str) -> None:
 
 # ==============================================================================
 #  PARCEL LOOKUP
-#  Confirmed field names from diagnostic 2026-04-21:
-#    ownername, owneraddrline1, owneraddrcity, owneraddrstate,
-#    owneraddrzip, situsconcat
 # ==============================================================================
 
 _parcel_cache: dict[str, dict] = {}
@@ -200,7 +180,6 @@ def _socrata_lookup(owner_variant: str) -> dict:
             if not (isinstance(rows, list) and rows):
                 continue
             r = rows[0]
-
             situs      = safe_str(r.get("situsconcat", ""))
             mail_addr  = safe_str(r.get("owneraddrline1", ""))
             mail_city  = safe_str(r.get("owneraddrcity", ""))
@@ -208,9 +187,7 @@ def _socrata_lookup(owner_variant: str) -> dict:
             mail_zip   = safe_str(r.get("owneraddrzip", ""))
             if "-" in mail_zip:
                 mail_zip = mail_zip.split("-")[0]
-
             prop_addr, prop_city, prop_state, prop_zip = _parse_situsconcat(situs)
-
             if prop_addr or mail_addr:
                 return {
                     "prop_address": prop_addr,
@@ -226,19 +203,12 @@ def _socrata_lookup(owner_variant: str) -> dict:
             log.debug("Socrata error %r: %s", owner_variant[:40], exc)
     return {}
 
-
 def _socrata_fuzzy(owner_variant: str) -> dict:
-    """
-    Fallback: use LIKE with wildcard for partial name matching.
-    Handles cases where name order differs.
-    """
     parts = owner_variant.strip().split()
     if not parts:
         return {}
-    # Search for first significant word (skip single letters)
     search_word = next((p for p in parts if len(p) > 2), parts[0])
     safe_word = search_word.replace("'", "''")
-
     for endpoint in [SOCRATA_OWNER, SOCRATA_APPR]:
         try:
             resp = requests.get(
@@ -255,13 +225,8 @@ def _socrata_fuzzy(owner_variant: str) -> dict:
             rows = resp.json()
             if not (isinstance(rows, list) and rows):
                 continue
-
-            # Find best match among results
-            owner_upper = owner_variant.upper()
             for r in rows:
                 rname = safe_str(r.get("ownername", "")).upper()
-                # Check if all significant parts of the owner name appear
-                # in the returned name (regardless of order)
                 sig_parts = [p for p in parts if len(p) > 2]
                 if all(p in rname for p in sig_parts):
                     situs     = safe_str(r.get("situsconcat", ""))
@@ -287,7 +252,6 @@ def _socrata_fuzzy(owner_variant: str) -> dict:
         except Exception as exc:
             log.debug("Socrata fuzzy error %r: %s", owner_variant[:40], exc)
     return {}
-
 
 def _arcgis_lookup(owner_variant: str) -> dict:
     safe_name = owner_variant.replace("'", "''")
@@ -331,31 +295,23 @@ def _arcgis_lookup(owner_variant: str) -> dict:
         log.debug("ArcGIS error %r: %s", owner_variant[:40], exc)
         return {}
 
-
 def lookup_parcel(owner: str) -> dict:
     if not owner:
         return {}
     cache_key = owner.strip().upper()
     if cache_key in _parcel_cache:
         return _parcel_cache[cache_key]
-
     result: dict = {}
-
-    # Try all exact name variants first
     for variant in name_variants(owner):
         result = _socrata_lookup(variant)
         if result.get("prop_address") or result.get("mail_address"):
             _parcel_cache[cache_key] = result
             return result
-
-    # Try ArcGIS exact
     for variant in name_variants(owner):
         result = _arcgis_lookup(variant)
         if result.get("prop_address") or result.get("mail_address"):
             _parcel_cache[cache_key] = result
             return result
-
-    # Try fuzzy Socrata (LIKE search) as last resort
     result = _socrata_fuzzy(owner.strip().upper())
     _parcel_cache[cache_key] = result
     return result
@@ -459,7 +415,6 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
     records: list[dict] = []
     html = await page.content()
     soup = BeautifulSoup(html, "lxml")
-
     table = soup.find("table")
     if table:
         headers = [th.get_text(" ", strip=True).lower()
@@ -474,7 +429,6 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                 dict(zip(headers, cells)), href, doc_type))
         if records:
             return records
-
     for sel in [
         "[data-testid='result-item']",
         "[class*='record-card']",
@@ -502,7 +456,6 @@ async def _parse_neumo_html(page: Page, doc_type: str) -> list[dict]:
                     records.append(rec)
             if records:
                 return records
-
     return records
 
 async def _click_next(page: Page) -> bool:
@@ -554,7 +507,6 @@ async def scrape_doc_type(
                     raise
                 log.warning("    nav attempt %d: %s", attempt, exc)
                 await asyncio.sleep(RETRY_DELAY)
-
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
@@ -563,13 +515,10 @@ async def scrape_doc_type(
                 title = await page.title()
                 if "Loading" not in title:
                     break
-
         if doc_type == "LP":
             await screenshot(page, "search_LP")
             await save_html(page, "search_LP")
-
         log.info("  title: %s | api: %d", title, len(api_responses))
-
         if api_responses:
             for body in api_responses:
                 records.extend(_extract_from_api(body, doc_type))
@@ -587,7 +536,6 @@ async def scrape_doc_type(
                         break
                     for body in api_responses:
                         records.extend(_extract_from_api(body, doc_type))
-
         if not records:
             records = await _parse_neumo_html(page, doc_type)
             for _ in range(20):
@@ -597,9 +545,7 @@ async def scrape_doc_type(
                 if not new:
                     break
                 records.extend(new)
-
         log.info("  -> %d records for %s", len(records), doc_type)
-
     except Exception as exc:
         log.error("scrape_doc_type(%s): %s", doc_type, exc)
         if DEBUG:
@@ -709,32 +655,27 @@ def compute_score(rec: dict, flags: list[str]) -> int:
 
 def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     assembled: list[dict] = []
-    # Deduplicate by doc_num only when doc_num is non-empty
-    # Records with empty doc_num are all kept (they are real records,
-    # just the HTML parser didn't capture the doc number)
-    seen_doc_nums: set = set()
+    seen: set = set()
     total = len(raw_records)
 
     for i, raw in enumerate(raw_records, 1):
         try:
             doc_num = safe_str(raw.get("doc_num", ""))
+            owner   = safe_str(raw.get("owner", ""))
+            filed   = safe_str(raw.get("filed", ""))
+            cat     = safe_str(raw.get("cat", ""))
 
-          # Only deduplicate when we have a real doc number
+            # Deduplicate: use doc_num when available,
+            # otherwise use owner+filed+cat as a composite key
             if doc_num:
-                if doc_num in seen_doc_nums:
-                    continue
-                seen_doc_nums.add(doc_num)
+                dedup_key = ("doc", doc_num)
             else:
-                fallback_key = (
-                    safe_str(raw.get("owner", "")).upper(),
-                    safe_str(raw.get("filed", "")),
-                    safe_str(raw.get("cat", "")),
-                )
-                if fallback_key in seen_doc_nums:
-                    continue
-                seen_doc_nums.add(fallback_key)
+                dedup_key = ("combo", owner.upper(), filed, cat)
 
-            owner      = safe_str(raw.get("owner", ""))
+            if dedup_key in seen:
+                continue
+            seen.add(dedup_key)
+
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
 
@@ -746,8 +687,8 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
             rec: dict = {
                 "doc_num":      doc_num,
                 "doc_type":     safe_str(raw.get("doc_type", "")),
-                "filed":        safe_str(raw.get("filed", "")),
-                "cat":          safe_str(raw.get("cat", "")),
+                "filed":        filed,
+                "cat":          cat,
                 "cat_label":    safe_str(raw.get("cat_label", "")),
                 "owner":        owner,
                 "grantee":      safe_str(raw.get("grantee", "")),
@@ -777,6 +718,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     log.info("Assembled %d records, %d with address", len(assembled), with_addr)
     return assembled
 
+
 def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     payload = {
         "fetched_at":   datetime.now(timezone.utc).isoformat(),
@@ -789,6 +731,7 @@ def save_output(records: list[dict], date_from: str, date_to: str) -> None:
     for path in [DASHBOARD_DIR / "records.json", DATA_DIR / "records.json"]:
         path.write_text(json.dumps(payload, indent=2, default=str))
         log.info("Saved -> %s", path)
+
 
 def export_ghl_csv(records: list[dict]) -> None:
     out_path = DATA_DIR / "ghl_export.csv"
