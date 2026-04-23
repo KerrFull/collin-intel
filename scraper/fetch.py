@@ -540,6 +540,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                 log.error("Could not load any search results page")
             else:
                 await screenshot(page, "search_all")
+                await save_html(page, "search_all")
                 log.info("api responses: %d", len(api_responses))
 
                 if api_responses:
