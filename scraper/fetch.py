@@ -460,16 +460,48 @@ async def _click_next(page: Page) -> bool:
     return True
 
 async def _load_search(page: Page, date_from: str, date_to: str) -> bool:
-    """Try multiple search terms until one loads. Returns True on success."""
-    search_terms = ["LP", "RELLP", "JUD", "CCJ", "LN", "NOC", "PRO", "LNHOA"]
-    for term in search_terms:
-        url = build_search_url(date_from, date_to, term)
-        log.info("Trying term %s ...", term)
-        try:
-            await page.goto(url, timeout=60_000, wait_until="networkidle")
-        except Exception as exc:
-            log.warning("  goto failed for %s: %s", term, exc)
-            continue
+    """Use Advanced Search to properly filter by date range."""
+    try:
+        url = f"{CLERK_BASE}/search/advanced"
+        log.info("Loading Advanced Search: %s", url)
+        await page.goto(url, timeout=60_000, wait_until="networkidle")
+        await asyncio.sleep(3)
+
+        # Set department to Property Records
+        dept = page.locator("select, [data-testid*='department']").first
+        if await dept.count() > 0:
+            await dept.select_option(label="Property Records")
+            await asyncio.sleep(0.5)
+
+        # Set date from
+        for sel in ["input[placeholder*='Start' i]", "input[placeholder*='From' i]",
+                    "input[id*='start' i]", "input[id*='from' i]",
+                    "[data-testid*='startDate']", "[data-testid*='fromDate']"]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.click()
+                await el.fill(date_from)
+                await asyncio.sleep(0.3)
+                break
+
+        # Set date to
+        for sel in ["input[placeholder*='End' i]", "input[placeholder*='To' i]",
+                    "input[id*='end' i]", "input[id*='to' i]",
+                    "[data-testid*='endDate']", "[data-testid*='toDate']"]:
+            el = page.locator(sel).first
+            if await el.count() > 0:
+                await el.click()
+                await el.fill(date_to)
+                await asyncio.sleep(0.3)
+                break
+
+        # Submit
+        for sel in ["button[type='submit']", "button:has-text('Search')", "input[type='submit']"]:
+            btn = page.locator(sel).first
+            if await btn.count() > 0:
+                await btn.click()
+                break
+
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
@@ -478,11 +510,15 @@ async def _load_search(page: Page, date_from: str, date_to: str) -> bool:
                 title = await page.title()
                 if "Loading" not in title:
                     break
-        if "Loading" not in title:
-            log.info("  Loaded with term %s | title: %s", term, title)
-            return True
-        log.warning("  Still loading after wait, trying next term")
-    return False
+
+        log.info("Advanced search title: %s", title)
+        await screenshot(page, "advanced_search_result")
+        await save_html(page, "advanced_search_result")
+        return "Loading" not in title
+
+    except Exception as exc:
+        log.error("Advanced search failed: %s", exc)
+        return False
 
 async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
