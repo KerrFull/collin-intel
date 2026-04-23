@@ -437,10 +437,18 @@ async def _parse_neumo_html(page: Page, doc_type: str = "") -> list[dict]:
 
 async def _click_next(page: Page) -> bool:
     btn = page.locator(
-        "button:has-text('Next'), [aria-label='Next page'], "
-        "[data-testid='next-page'], button[class*='next' i], "
-        "a:has-text('Next')"
+        "button[aria-label='Next page'], "
+        "button[aria-label='next'], "
+        "li.next > a, "
+        "a[aria-label='Next'], "
+        "[data-testid='next-page'], "
+        "button:has(svg[data-icon='chevron-right']), "
+        "button:has(svg[data-icon='angle-right']), "
+        "button.next"
     ).first
+    if await btn.count() == 0:
+        # Try the right arrow unicode button
+        btn = page.locator("button:has-text('►'), button:has-text('›'), button:has-text('»')").first
     if await btn.count() == 0:
         return False
     disabled = await btn.get_attribute("disabled")
