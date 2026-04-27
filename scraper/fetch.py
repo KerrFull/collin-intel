@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+python#!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
@@ -44,9 +44,6 @@ ARCGIS_URL = (
     "ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1/query"
 )
 
-# These are the doc types we search for — each gets its own URL search
-# The portal ignores searchTerm but applies the date range correctly
-# Each search returns the same 50 most recent records for that date range
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
     "RELLP":    ("RELLP",    "Release Lis Pendens",     ["Lis pendens"]),
@@ -148,6 +145,7 @@ async def save_html(page: Page, name: str) -> None:
     try:
         (DEBUG_DIR / f"{name}.html").write_text(
             await page.content(), encoding="utf-8")
+        log.info("  html saved: %s.html", name)
     except Exception:
         pass
 
@@ -309,10 +307,6 @@ def lookup_parcel(owner: str) -> dict:
 
 # ==============================================================================
 #  CLERK PORTAL
-#  Each doc type search returns the 50 most recent records for the date range.
-#  All searches return the same records (portal ignores searchTerm).
-#  We run all searches, collect all records, deduplicate by doc_num.
-#  The doc_type field on each record tells us what type it is.
 # ==============================================================================
 
 def build_search_url(date_from: str, date_to: str, term: str) -> str:
@@ -443,25 +437,55 @@ async def _parse_neumo_html(page: Page, doc_type: str = "") -> list[dict]:
     return records
 
 async def _click_next(page: Page) -> bool:
-    # From screenshot: pagination is numbered buttons with a ► right arrow
-    for sel in [
+    """Click the next page button. Tries many selectors."""
+    selectors = [
         "button[aria-label='Go to next page']",
         "button[aria-label='Next page']",
         "button[aria-label='next']",
         "[data-testid='next-page']",
         "li.next > a",
         "a[aria-label='Next']",
-    ]:
-        btn = page.locator(sel).first
-        if await btn.count() > 0:
-            disabled = await btn.get_attribute("disabled")
-            cls = (await btn.get_attribute("class") or "").lower()
-            if disabled is None and "disabled" not in cls:
-                await btn.click()
+        "button.pagination-next",
+        "[class*='pagination'] button:last-child",
+        "[class*='Pagination'] button:last-child",
+        "[class*='pager'] button:last-child",
+        "button:has-text('>')",
+        "button:has-text('»')",
+        "button:has-text('Next')",
+        "a:has-text('Next')",
+    ]
+    for sel in selectors:
+        try:
+            btn = page.locator(sel).first
+            if await btn.count() > 0:
+                disabled = await btn.get_attribute("disabled")
+                cls = (await btn.get_attribute("class") or "").lower()
+                aria = (await btn.get_attribute("aria-disabled") or "").lower()
+                if (disabled is None and "disabled" not in cls
+                        and aria != "true"):
+                    await btn.click()
+                    await asyncio.sleep(2.5)
+                    return True
+        except Exception:
+            continue
+
+    # Last resort: find all buttons near the bottom of page and click
+    # the one that looks like a right-arrow (SVG chevron)
+    try:
+        # Look for a button containing an SVG with a right-pointing path
+        all_btns = page.locator("nav button, [class*='pagination'] button, [class*='Pagination'] button")
+        count = await all_btns.count()
+        if count > 0:
+            # Try the last button in any pagination container
+            last = all_btns.nth(count - 1)
+            disabled = await last.get_attribute("disabled")
+            if disabled is None:
+                await last.click()
                 await asyncio.sleep(2.5)
                 return True
-    # Try SVG right-arrow button (the ► at bottom right of results)
-    btns = page.locator("button svg").all()
+    except Exception:
+        pass
+
     return False
 
 async def scrape_one_page(
@@ -470,7 +494,7 @@ async def scrape_one_page(
     date_from: str,
     date_to: str,
 ) -> list[dict]:
-    """Load one search URL, parse results, paginate through all pages."""
+    """Load one search URL, save HTML for inspection, parse and paginate."""
     page: Page = await context.new_page()
     records: list[dict] = []
     api_responses: list[dict] = []
@@ -508,6 +532,10 @@ async def scrape_one_page(
 
         log.info("  title: %s | api: %d", title, len(api_responses))
 
+        # Save HTML so we can inspect pagination buttons
+        await save_html(page, f"results_{term}")
+        await screenshot(page, f"results_{term}")
+
         if "Loading" in title:
             log.warning("  Still loading — skipping %s", term)
             return records
@@ -516,7 +544,7 @@ async def scrape_one_page(
             for body in api_responses:
                 records.extend(_extract_from_api(body))
             if records:
-                # Paginate
+                page_num = 1
                 for _ in range(50):
                     api_responses.clear()
                     if not await _click_next(page):
@@ -524,18 +552,25 @@ async def scrape_one_page(
                     await asyncio.sleep(2.5)
                     for body in api_responses:
                         records.extend(_extract_from_api(body))
+                    page_num += 1
+                    log.info("  page %d -> %d records total", page_num, len(records))
                     if not api_responses:
                         break
 
         if not records:
             records = await _parse_neumo_html(page)
+            page_num = 1
             for _ in range(50):
                 if not await _click_next(page):
+                    log.info("  no more pages after page %d", page_num)
                     break
+                await asyncio.sleep(2.5)
                 new = await _parse_neumo_html(page)
                 if not new:
                     break
                 records.extend(new)
+                page_num += 1
+                log.info("  page %d -> %d records total", page_num, len(records))
 
         log.info("  -> %d records from %s", len(records), term)
 
@@ -549,10 +584,6 @@ async def scrape_one_page(
 async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
 
-    # Search terms — portal returns same records for all, but we try
-    # different ones in case some time out. We only need ONE successful
-    # search to get all records for the date range.
-    # We try a few terms and stop as soon as we get results.
     search_terms = ["RELLP", "JUD", "CCJ", "LNHOA", "NOC", "PRO",
                     "LN", "LNMECH", "LNIRS", "LNFED", "MEDLN",
                     "LP", "NOFC", "TAXDEED", "DRJUD", "LNCORPTX"]
@@ -599,7 +630,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
         finally:
             await warmup.close()
 
-        # Try each search term until we get records, then paginate fully
         for term in search_terms:
             records = await scrape_one_page(context, term, date_from, date_to)
             if records:
@@ -610,7 +640,6 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
 
         await browser.close()
 
-    # Tag records with doc type category
     for r in all_records:
         dt = r.get("doc_type", "").upper().strip()
         if dt in DOC_TYPE_MAP:
