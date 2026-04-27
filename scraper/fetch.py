@@ -44,6 +44,9 @@ ARCGIS_URL = (
     "ReferenceData/Collin_County_Appraisal_District_Parcels/MapServer/1/query"
 )
 
+# These are the doc types we search for — each gets its own URL search
+# The portal ignores searchTerm but applies the date range correctly
+# Each search returns the same 50 most recent records for that date range
 DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "LP":       ("LP",       "Lis Pendens",             ["Lis pendens", "Pre-foreclosure"]),
     "RELLP":    ("RELLP",    "Release Lis Pendens",     ["Lis pendens"]),
@@ -306,6 +309,10 @@ def lookup_parcel(owner: str) -> dict:
 
 # ==============================================================================
 #  CLERK PORTAL
+#  Each doc type search returns the 50 most recent records for the date range.
+#  All searches return the same records (portal ignores searchTerm).
+#  We run all searches, collect all records, deduplicate by doc_num.
+#  The doc_type field on each record tells us what type it is.
 # ==============================================================================
 
 def build_search_url(date_from: str, date_to: str, term: str) -> str:
@@ -436,92 +443,120 @@ async def _parse_neumo_html(page: Page, doc_type: str = "") -> list[dict]:
     return records
 
 async def _click_next(page: Page) -> bool:
-    btn = page.locator(
-        "button[aria-label='Next page'], "
-        "button[aria-label='next'], "
-        "li.next > a, "
-        "a[aria-label='Next'], "
-        "[data-testid='next-page'], "
-        "button:has(svg[data-icon='chevron-right']), "
-        "button:has(svg[data-icon='angle-right']), "
-        "button.next"
-    ).first
-    if await btn.count() == 0:
-        # Try the right arrow unicode button
-        btn = page.locator("button:has-text('►'), button:has-text('›'), button:has-text('»')").first
-    if await btn.count() == 0:
-        return False
-    disabled = await btn.get_attribute("disabled")
-    cls = (await btn.get_attribute("class") or "").lower()
-    if disabled is not None or "disabled" in cls:
-        return False
-    await btn.click()
-    await asyncio.sleep(2.5)
-    return True
-
-async def _load_search(page: Page, date_from: str, date_to: str) -> bool:
-    """Use Advanced Search to properly filter by date range."""
-    try:
-        url = f"{CLERK_BASE}/search/advanced"
-        log.info("Loading Advanced Search: %s", url)
-        await page.goto(url, timeout=60_000, wait_until="networkidle")
-        await asyncio.sleep(3)
-
-        # Set department to Property Records
-        dept = page.locator("select, [data-testid*='department']").first
-        if await dept.count() > 0:
-            await dept.select_option(label="Property Records")
-            await asyncio.sleep(0.5)
-
-        # Set date from
-        for sel in ["input[placeholder*='Start' i]", "input[placeholder*='From' i]",
-                    "input[id*='start' i]", "input[id*='from' i]",
-                    "[data-testid*='startDate']", "[data-testid*='fromDate']"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.click()
-                await el.fill(date_from)
-                await asyncio.sleep(0.3)
-                break
-
-        # Set date to
-        for sel in ["input[placeholder*='End' i]", "input[placeholder*='To' i]",
-                    "input[id*='end' i]", "input[id*='to' i]",
-                    "[data-testid*='endDate']", "[data-testid*='toDate']"]:
-            el = page.locator(sel).first
-            if await el.count() > 0:
-                await el.click()
-                await el.fill(date_to)
-                await asyncio.sleep(0.3)
-                break
-
-        # Submit
-        for sel in ["button[type='submit']", "button:has-text('Search')", "input[type='submit']"]:
-            btn = page.locator(sel).first
-            if await btn.count() > 0:
+    # From screenshot: pagination is numbered buttons with a ► right arrow
+    for sel in [
+        "button[aria-label='Go to next page']",
+        "button[aria-label='Next page']",
+        "button[aria-label='next']",
+        "[data-testid='next-page']",
+        "li.next > a",
+        "a[aria-label='Next']",
+    ]:
+        btn = page.locator(sel).first
+        if await btn.count() > 0:
+            disabled = await btn.get_attribute("disabled")
+            cls = (await btn.get_attribute("class") or "").lower()
+            if disabled is None and "disabled" not in cls:
                 await btn.click()
+                await asyncio.sleep(2.5)
+                return True
+    # Try SVG right-arrow button (the ► at bottom right of results)
+    btns = page.locator("button svg").all()
+    return False
+
+async def scrape_one_page(
+    context: BrowserContext,
+    term: str,
+    date_from: str,
+    date_to: str,
+) -> list[dict]:
+    """Load one search URL, parse results, paginate through all pages."""
+    page: Page = await context.new_page()
+    records: list[dict] = []
+    api_responses: list[dict] = []
+
+    async def capture(response):
+        ct = response.headers.get("content-type", "")
+        if "json" in ct and any(x in response.url
+                                for x in ["/api/", "/search", "/result", "/record"]):
+            try:
+                api_responses.append(await response.json())
+            except Exception:
+                pass
+
+    page.on("response", capture)
+    try:
+        url = build_search_url(date_from, date_to, term)
+        log.info("  Fetching %s", url)
+        for attempt in range(1, RETRY_ATTEMPTS + 1):
+            try:
+                await page.goto(url, timeout=60_000, wait_until="networkidle")
                 break
+            except Exception as exc:
+                if attempt == RETRY_ATTEMPTS:
+                    raise
+                await asyncio.sleep(RETRY_DELAY)
 
         await asyncio.sleep(4)
         title = await page.title()
         if "Loading" in title:
-            for _ in range(40):
+            for _ in range(35):
                 await asyncio.sleep(1)
                 title = await page.title()
                 if "Loading" not in title:
                     break
 
-        log.info("Advanced search title: %s", title)
-        await screenshot(page, "advanced_search_result")
-        await save_html(page, "advanced_search_result")
-        return "Loading" not in title
+        log.info("  title: %s | api: %d", title, len(api_responses))
+
+        if "Loading" in title:
+            log.warning("  Still loading — skipping %s", term)
+            return records
+
+        if api_responses:
+            for body in api_responses:
+                records.extend(_extract_from_api(body))
+            if records:
+                # Paginate
+                for _ in range(50):
+                    api_responses.clear()
+                    if not await _click_next(page):
+                        break
+                    await asyncio.sleep(2.5)
+                    for body in api_responses:
+                        records.extend(_extract_from_api(body))
+                    if not api_responses:
+                        break
+
+        if not records:
+            records = await _parse_neumo_html(page)
+            for _ in range(50):
+                if not await _click_next(page):
+                    break
+                new = await _parse_neumo_html(page)
+                if not new:
+                    break
+                records.extend(new)
+
+        log.info("  -> %d records from %s", len(records), term)
 
     except Exception as exc:
-        log.error("Advanced search failed: %s", exc)
-        return False
+        log.error("scrape_one_page(%s): %s", term, exc)
+        await screenshot(page, f"error_{term}")
+    finally:
+        await page.close()
+    return records
 
 async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
     all_records: list[dict] = []
+
+    # Search terms — portal returns same records for all, but we try
+    # different ones in case some time out. We only need ONE successful
+    # search to get all records for the date range.
+    # We try a few terms and stop as soon as we get results.
+    search_terms = ["RELLP", "JUD", "CCJ", "LNHOA", "NOC", "PRO",
+                    "LN", "LNMECH", "LNIRS", "LNFED", "MEDLN",
+                    "LP", "NOFC", "TAXDEED", "DRJUD", "LNCORPTX"]
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -553,10 +588,10 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
                                   {get: () => ['en-US','en']});
             window.chrome = {runtime: {}};
         """)
+
         warmup = await context.new_page()
         try:
-            await warmup.goto(CLERK_BASE, timeout=30_000,
-                              wait_until="networkidle")
+            await warmup.goto(CLERK_BASE, timeout=30_000, wait_until="networkidle")
             await asyncio.sleep(3)
             await screenshot(warmup, "homepage")
         except Exception as exc:
@@ -564,61 +599,18 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
         finally:
             await warmup.close()
 
-        page: Page = await context.new_page()
-        api_responses: list[dict] = []
-
-        async def capture(response):
-            ct = response.headers.get("content-type", "")
-            if "json" in ct and any(x in response.url
-                                    for x in ["/api/", "/search",
-                                              "/result", "/record"]):
-                try:
-                    api_responses.append(await response.json())
-                except Exception:
-                    pass
-
-        page.on("response", capture)
-        try:
-            loaded = await _load_search(page, date_from, date_to)
-            if not loaded:
-                log.error("Could not load any search results page")
-            else:
-                await screenshot(page, "search_all")
-                await save_html(page, "search_all")
-                log.info("api responses: %d", len(api_responses))
-
-                if api_responses:
-                    for body in api_responses:
-                        all_records.extend(_extract_from_api(body))
-                    if all_records:
-                        for _ in range(200):
-                            api_responses.clear()
-                            if not await _click_next(page):
-                                break
-                            await asyncio.sleep(2)
-                            for body in api_responses:
-                                all_records.extend(_extract_from_api(body))
-
-                if not all_records:
-                    all_records = await _parse_neumo_html(page)
-                    for _ in range(200):
-                        if not await _click_next(page):
-                            break
-                        new = await _parse_neumo_html(page)
-                        if not new:
-                            break
-                        all_records.extend(new)
-
-                log.info("Total raw records: %d", len(all_records))
-
-        except Exception as exc:
-            log.error("Clerk scrape error: %s", exc)
-            await screenshot(page, "error_main")
-        finally:
-            await page.close()
+        # Try each search term until we get records, then paginate fully
+        for term in search_terms:
+            records = await scrape_one_page(context, term, date_from, date_to)
+            if records:
+                all_records = records
+                log.info("Got %d records using term %s", len(all_records), term)
+                break
+            await asyncio.sleep(2)
 
         await browser.close()
 
+    # Tag records with doc type category
     for r in all_records:
         dt = r.get("doc_type", "").upper().strip()
         if dt in DOC_TYPE_MAP:
@@ -628,7 +620,7 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
             r["cat"]       = dt
             r["cat_label"] = dt
 
-    log.info("Records after tagging: %d", len(all_records))
+    log.info("Total records after tagging: %d", len(all_records))
     return all_records
 
 
