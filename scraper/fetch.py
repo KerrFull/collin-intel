@@ -1,4 +1,4 @@
-python#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
