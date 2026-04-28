@@ -63,19 +63,6 @@ DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "NOC":      ("NOC",      "Notice of Commencement",  []),
 }
 
-# Doc types we actually want — used to filter results
-TARGET_DOC_TYPES = {
-    "LIS PENDENS", "RELEASE OF LIS PENDENS", "NOTICE OF FORECLOSURE",
-    "TAX DEED", "JUDGMENT", "CERTIFIED JUDGMENT", "DOMESTIC JUDGMENT",
-    "CORP TAX LIEN", "IRS LIEN", "FEDERAL TAX LIEN", "FEDERAL LIEN",
-    "LIEN", "MECHANIC LIEN", "HOA LIEN", "MEDICAID LIEN",
-    "PROBATE", "NOTICE OF COMMENCEMENT",
-    # Also match by our code keys
-    "LP", "RELLP", "NOFC", "TAXDEED", "JUD", "CCJ", "DRJUD",
-    "LNCORPTX", "LNIRS", "LNFED", "LN", "LNMECH", "LNHOA",
-    "MEDLN", "PRO", "NOC",
-}
-
 ROOT          = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 DATA_DIR      = ROOT / "data"
@@ -144,12 +131,9 @@ def _parse_situsconcat(situs: str) -> tuple[str, str, str, str]:
     return prop_addr, prop_city, prop_state, prop_zip
 
 def _map_doc_type(raw_type: str) -> tuple[str, str]:
-    """Map a raw doc type string to (cat_code, cat_label)."""
     t = raw_type.upper().strip()
-    # Direct code match
     if t in DOC_TYPE_MAP:
         return t, DOC_TYPE_MAP[t][1]
-    # Keyword matching
     if "LIS PENDENS" in t and "RELEASE" not in t:
         return "LP", "Lis Pendens"
     if "RELEASE" in t and "LIS PENDENS" in t:
@@ -160,7 +144,7 @@ def _map_doc_type(raw_type: str) -> tuple[str, str]:
         return "TAXDEED", "Tax Deed"
     if "IRS" in t or "INTERNAL REVENUE" in t:
         return "LNIRS", "IRS Lien"
-    if "FEDERAL TAX" in t or "FEDERAL LIEN" in t:
+    if "FEDERAL TAX" in t or ("FEDERAL" in t and "LIEN" in t):
         return "LNFED", "Federal Lien"
     if "CORP" in t and ("TAX" in t or "LIEN" in t):
         return "LNCORPTX", "Corp Tax Lien"
@@ -354,7 +338,7 @@ def lookup_parcel(owner: str) -> dict:
         if result.get("prop_address") or result.get("mail_address"):
             _parcel_cache[cache_key] = result
             return result
-    # Fuzzy only for short names — skip for long ones to avoid slow searches
+    # Fuzzy only for short names to keep lookups fast
     if len(owner.split()) <= 3:
         result = _socrata_fuzzy(owner.strip().upper())
     _parcel_cache[cache_key] = result
@@ -364,37 +348,34 @@ def lookup_parcel(owner: str) -> dict:
 # ==============================================================================
 #  CLERK PORTAL
 #
-#  The Neumo portal ignores the searchTerm URL param and returns ALL records.
-#  The date range in the URL is also ignored — it returns all historical records.
-#
-#  Solution: load the search page with any term, then:
-#    1. Click the "2026" year filter in the left sidebar to narrow to 2026
-#    2. Paginate through all pages using button[aria-label="next page"]
-#    3. Filter results client-side to only the last 7 days by recorded date
-#
-#  Confirmed from HTML inspection:
-#    - Next button: button[aria-label="next page"]
-#    - Previous button: button[aria-label="previous page"] (disabled on p1)
-#    - Page buttons: button[aria-label="page N"]
-#    - Year filter: sidebar buttons/links containing the year text
+#  From HTML inspection of page1_JUD.html:
+#  - Year filter checkbox: id="recordedYears_2026"
+#  - Sort by date header: aria-label="Recorded Date, activate to sort"
+#  - Next page button: button[aria-label="next page"]
+#  - Table headers: Grantor, Grantee, Doc Type, Recorded Date, Doc Number,
+#                   Book/Volume/Page, Legal Description
 # ==============================================================================
 
 def build_search_url(term: str) -> str:
-    """Build a quicksearch URL with just a search term — no date filter
-    since the portal ignores it anyway."""
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
         f"&searchTerm={term}"
     )
 
-def _parse_table(html: str, date_from: datetime, date_to: datetime) -> list[dict]:
-    """Parse the results table and filter to our date range."""
+def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[list[dict], bool]:
+    """
+    Parse the results table.
+    Returns (records, all_too_old) where all_too_old=True means every record
+    on this page is older than our lookback window — signal to stop paginating.
+    """
     soup = BeautifulSoup(html, "lxml")
     records = []
+    all_too_old = True  # assume True until we find a recent record
+
     table = soup.find("table")
     if not table:
-        return records
+        return records, False  # no table = don't stop, try next page
 
     headers = [th.get_text(" ", strip=True).lower()
                for th in table.find_all("th")]
@@ -408,36 +389,42 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> list[dict
         def g(*keys) -> str:
             for k in keys:
                 v = row.get(k, "")
-                if v:
+                if v and v != "N/A":
                     return v.strip()
             return ""
 
-        raw_date = g("recorded date", "recordeddate", "date", "filed")
-        doc_num  = g("doc number", "doc #", "instrument", "document number")
-        owner    = g("grantor", "owner")
+        raw_date = g("recorded date")
+        doc_num  = g("doc number")
+        owner    = g("grantor")
         grantee  = g("grantee")
-        doc_type = g("doc type", "document type", "type")
-        legal    = g("legal description", "legal")
+        doc_type = g("doc type")
+        legal    = g("legal description")
 
-        # Parse and filter date
+        if not raw_date:
+            continue
+
+        # Parse date
         rec_date = None
-        if raw_date:
-            try:
-                rec_date = datetime.strptime(raw_date, "%m/%d/%Y")
-            except ValueError:
-                pass
-
-        # Skip if outside our date range
-        if rec_date and not (date_from <= rec_date <= date_to):
+        try:
+            rec_date = datetime.strptime(raw_date, "%m/%d/%Y")
+        except ValueError:
             continue
 
-        # Skip obviously bad records (1900s, no owner)
-        if rec_date and rec_date.year < 2020:
+        # If this record is within range, mark that not all are too old
+        if date_from <= rec_date <= date_to:
+            all_too_old = False
+        elif rec_date > date_to:
+            # Future record — skip but don't stop
             continue
+        elif rec_date < date_from:
+            # Too old — skip but continue checking other rows
+            continue
+
+        # Skip bad records
         if not owner or owner == "N/A":
             continue
 
-        # Find link
+        # Find clerk URL from link in this row
         link = tr.find("a", href=True)
         clerk_url = _abs_url(link["href"]) if link else ""
 
@@ -456,21 +443,54 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> list[dict
             "clerk_url": clerk_url,
         })
 
-    return records
+    return records, all_too_old
 
 async def _click_next(page: Page) -> bool:
-    """Click next page button — confirmed selector from HTML inspection."""
+    """Click next page — confirmed selector: button[aria-label='next page']"""
     try:
         btn = page.locator("button[aria-label='next page']").first
         if await btn.count() > 0:
             disabled = await btn.get_attribute("disabled")
             if disabled is None:
                 await btn.click()
-                await asyncio.sleep(2.5)
+                await asyncio.sleep(3)
                 return True
     except Exception:
         pass
     return False
+
+async def _apply_filters(page: Page, year: str) -> None:
+    """
+    Apply the year checkbox filter and sort by date descending.
+    From HTML: year checkbox id="recordedYears_2026"
+    Sort: click th[aria-label="Recorded Date, activate to sort"] twice for desc
+    """
+    try:
+        # Click the year checkbox to filter to current year
+        cb = page.locator(f"#recordedYears_{year}").first
+        if await cb.count() > 0:
+            await cb.click()
+            await asyncio.sleep(3)
+            log.info("  Year %s filter applied", year)
+        else:
+            log.warning("  Year checkbox #recordedYears_%s not found", year)
+
+        # Click "Recorded Date" column header to sort
+        # First click = ascending, second click = descending (newest first)
+        date_header = page.locator(
+            "th[aria-label='Recorded Date, activate to sort']"
+        ).first
+        if await date_header.count() > 0:
+            await date_header.click()
+            await asyncio.sleep(2)
+            await date_header.click()
+            await asyncio.sleep(2)
+            log.info("  Sorted by Recorded Date descending")
+        else:
+            log.warning("  Recorded Date sort header not found")
+
+    except Exception as exc:
+        log.warning("  Filter/sort error: %s", exc)
 
 async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list[dict]:
     all_records: list[dict] = []
@@ -520,14 +540,14 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
         finally:
             await warmup.close()
 
-        # Try search terms until one loads
+        # Load search page
         page: Page | None = None
         loaded_term = None
         for term in search_terms:
             p = await context.new_page()
             try:
                 url = build_search_url(term)
-                log.info("Trying term %s: %s", term, url)
+                log.info("Trying term %s", term)
                 await p.goto(url, timeout=60_000, wait_until="networkidle")
                 await asyncio.sleep(4)
                 title = await p.title()
@@ -555,44 +575,28 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
             return all_records
 
         try:
-            # Step 1: Click the current year filter in the left sidebar
-            # to narrow results to 2026 only
+            # Apply year filter and sort by date descending
             current_year = str(date_to_dt.year)
-            log.info("Clicking year filter: %s", current_year)
-            year_btn = page.locator(
-                f"button:has-text('{current_year}'), "
-                f"a:has-text('{current_year}'), "
-                f"[data-testid*='year']:has-text('{current_year}'), "
-                f"label:has-text('{current_year}'), "
-                f"input[value='{current_year}']"
-            ).first
-            if await year_btn.count() > 0:
-                await year_btn.click()
-                await asyncio.sleep(3)
-                log.info("Year filter clicked")
-                await screenshot(page, "after_year_filter")
-            else:
-                log.warning("Year filter button not found — proceeding without it")
+            await _apply_filters(page, current_year)
+            await screenshot(page, "after_filters")
+            await save_html(page, "after_filters")
 
-            # Step 2: Save first page HTML for debugging
-            await save_html(page, f"page1_{loaded_term}")
-
-            # Step 3: Paginate through ALL pages, collect records
+            # Paginate — stop when records go older than our window
             page_num = 1
             consecutive_empty = 0
+            max_pages = 200
 
-            while True:
+            while page_num <= max_pages:
                 html = await page.content()
-                recs = _parse_table(html, date_from_dt, date_to_dt)
-                log.info("Page %d: %d matching records", page_num, len(recs))
+                recs, all_too_old = _parse_table(html, date_from_dt, date_to_dt)
+                log.info("Page %d: %d matching records (all_too_old=%s)",
+                         page_num, len(recs), all_too_old)
                 all_records.extend(recs)
 
-                # If we got no matching records on this page and records
-                # are dated before our range, we can stop early
-                if recs == [] and page_num > 1:
+                if all_too_old and page_num > 1:
                     consecutive_empty += 1
-                    if consecutive_empty >= 3:
-                        log.info("3 consecutive empty pages — stopping pagination")
+                    if consecutive_empty >= 2:
+                        log.info("Records too old — stopping at page %d", page_num)
                         break
                 else:
                     consecutive_empty = 0
@@ -601,10 +605,8 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
                     log.info("No more pages after page %d", page_num)
                     break
                 page_num += 1
-                log.info("Moving to page %d (total so far: %d)", page_num, len(all_records))
 
-            log.info("Pagination complete: %d total records from %d pages",
-                     len(all_records), page_num)
+            log.info("Done: %d records from %d pages", len(all_records), page_num)
 
         except Exception as exc:
             log.error("Scrape error: %s", exc)
