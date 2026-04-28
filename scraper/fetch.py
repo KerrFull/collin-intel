@@ -440,25 +440,37 @@ async def _click_next(page: Page) -> bool:
 
 async def _apply_filters(page: Page, year: str) -> None:
     try:
-        cb = page.locator(f"#recordedYears_{year}").first
-        if await cb.count() > 0:
-            await cb.click()
+        # The checkboxes use CSS custom styling — the actual input is hidden.
+        # Use JavaScript to click the hidden checkbox directly.
+        clicked = await page.evaluate(f"""
+            (() => {{
+                const cb = document.getElementById('recordedYears_{year}');
+                if (cb) {{
+                    cb.click();
+                    return true;
+                }}
+                return false;
+            }})()
+        """)
+        if clicked:
             await asyncio.sleep(3)
-            log.info("  Year %s filter applied", year)
+            log.info("  Year %s filter applied via JS", year)
         else:
-            log.warning("  Year checkbox #recordedYears_%s not found", year)
+            log.warning("  Year %s checkbox not found in DOM", year)
 
+        # Sort by Recorded Date descending — click header twice
         date_header = page.locator(
             "th[aria-label='Recorded Date, activate to sort']"
         ).first
         if await date_header.count() > 0:
-            await date_header.click()
+            await date_header.click(timeout=10000)
             await asyncio.sleep(2)
-            await date_header.click()
+            await date_header.click(timeout=10000)
             await asyncio.sleep(2)
             log.info("  Sorted by Recorded Date descending")
         else:
             log.warning("  Recorded Date sort header not found")
+
     except Exception as exc:
         log.warning("  Filter/sort error: %s", exc)
 
