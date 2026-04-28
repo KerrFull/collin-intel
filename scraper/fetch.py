@@ -338,7 +338,6 @@ def lookup_parcel(owner: str) -> dict:
         if result.get("prop_address") or result.get("mail_address"):
             _parcel_cache[cache_key] = result
             return result
-    # Fuzzy only for short names to keep lookups fast
     if len(owner.split()) <= 3:
         result = _socrata_fuzzy(owner.strip().upper())
     _parcel_cache[cache_key] = result
@@ -347,13 +346,6 @@ def lookup_parcel(owner: str) -> dict:
 
 # ==============================================================================
 #  CLERK PORTAL
-#
-#  From HTML inspection of page1_JUD.html:
-#  - Year filter checkbox: id="recordedYears_2026"
-#  - Sort by date header: aria-label="Recorded Date, activate to sort"
-#  - Next page button: button[aria-label="next page"]
-#  - Table headers: Grantor, Grantee, Doc Type, Recorded Date, Doc Number,
-#                   Book/Volume/Page, Legal Description
 # ==============================================================================
 
 def build_search_url(term: str) -> str:
@@ -364,18 +356,13 @@ def build_search_url(term: str) -> str:
     )
 
 def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[list[dict], bool]:
-    """
-    Parse the results table.
-    Returns (records, all_too_old) where all_too_old=True means every record
-    on this page is older than our lookback window — signal to stop paginating.
-    """
     soup = BeautifulSoup(html, "lxml")
     records = []
-    all_too_old = True  # assume True until we find a recent record
+    all_too_old = True
 
     table = soup.find("table")
     if not table:
-        return records, False  # no table = don't stop, try next page
+        return records, False
 
     headers = [th.get_text(" ", strip=True).lower()
                for th in table.find_all("th")]
@@ -403,31 +390,24 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[lis
         if not raw_date:
             continue
 
-        # Parse date
         rec_date = None
         try:
             rec_date = datetime.strptime(raw_date, "%m/%d/%Y")
         except ValueError:
             continue
 
-        # If this record is within range, mark that not all are too old
         if date_from <= rec_date <= date_to:
             all_too_old = False
         elif rec_date > date_to:
-            # Future record — skip but don't stop
             continue
         elif rec_date < date_from:
-            # Too old — skip but continue checking other rows
             continue
 
-        # Skip bad records
         if not owner or owner == "N/A":
             continue
 
-        # Find clerk URL from link in this row
         link = tr.find("a", href=True)
         clerk_url = _abs_url(link["href"]) if link else ""
-
         cat, cat_label = _map_doc_type(doc_type)
 
         records.append({
@@ -446,7 +426,6 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[lis
     return records, all_too_old
 
 async def _click_next(page: Page) -> bool:
-    """Click next page — confirmed selector: button[aria-label='next page']"""
     try:
         btn = page.locator("button[aria-label='next page']").first
         if await btn.count() > 0:
@@ -460,13 +439,7 @@ async def _click_next(page: Page) -> bool:
     return False
 
 async def _apply_filters(page: Page, year: str) -> None:
-    """
-    Apply the year checkbox filter and sort by date descending.
-    From HTML: year checkbox id="recordedYears_2026"
-    Sort: click th[aria-label="Recorded Date, activate to sort"] twice for desc
-    """
     try:
-        # Click the year checkbox to filter to current year
         cb = page.locator(f"#recordedYears_{year}").first
         if await cb.count() > 0:
             await cb.click()
@@ -475,8 +448,6 @@ async def _apply_filters(page: Page, year: str) -> None:
         else:
             log.warning("  Year checkbox #recordedYears_%s not found", year)
 
-        # Click "Recorded Date" column header to sort
-        # First click = ascending, second click = descending (newest first)
         date_header = page.locator(
             "th[aria-label='Recorded Date, activate to sort']"
         ).first
@@ -488,7 +459,6 @@ async def _apply_filters(page: Page, year: str) -> None:
             log.info("  Sorted by Recorded Date descending")
         else:
             log.warning("  Recorded Date sort header not found")
-
     except Exception as exc:
         log.warning("  Filter/sort error: %s", exc)
 
@@ -540,7 +510,6 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
         finally:
             await warmup.close()
 
-        # Load search page
         page: Page | None = None
         loaded_term = None
         for term in search_terms:
@@ -575,15 +544,13 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
             return all_records
 
         try:
-            # Apply year filter and sort by date descending
             current_year = str(date_to_dt.year)
             await _apply_filters(page, current_year)
             await screenshot(page, "after_filters")
             await save_html(page, "after_filters")
 
-            # Paginate — stop when records go older than our window
             page_num = 1
-            consecutive_empty = 0
+            consecutive_too_old = 0
             max_pages = 200
 
             while page_num <= max_pages:
@@ -594,12 +561,12 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
                 all_records.extend(recs)
 
                 if all_too_old and page_num > 1:
-                    consecutive_empty += 1
-                    if consecutive_empty >= 2:
+                    consecutive_too_old += 1
+                    if consecutive_too_old >= 2:
                         log.info("Records too old — stopping at page %d", page_num)
                         break
                 else:
-                    consecutive_empty = 0
+                    consecutive_too_old = 0
 
                 if not await _click_next(page):
                     log.info("No more pages after page %d", page_num)
