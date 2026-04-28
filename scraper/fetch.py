@@ -63,6 +63,19 @@ DOC_TYPE_MAP: dict[str, tuple[str, str, list[str]]] = {
     "NOC":      ("NOC",      "Notice of Commencement",  []),
 }
 
+# Doc types we actually want — used to filter results
+TARGET_DOC_TYPES = {
+    "LIS PENDENS", "RELEASE OF LIS PENDENS", "NOTICE OF FORECLOSURE",
+    "TAX DEED", "JUDGMENT", "CERTIFIED JUDGMENT", "DOMESTIC JUDGMENT",
+    "CORP TAX LIEN", "IRS LIEN", "FEDERAL TAX LIEN", "FEDERAL LIEN",
+    "LIEN", "MECHANIC LIEN", "HOA LIEN", "MEDICAID LIEN",
+    "PROBATE", "NOTICE OF COMMENCEMENT",
+    # Also match by our code keys
+    "LP", "RELLP", "NOFC", "TAXDEED", "JUD", "CCJ", "DRJUD",
+    "LNCORPTX", "LNIRS", "LNFED", "LN", "LNMECH", "LNHOA",
+    "MEDLN", "PRO", "NOC",
+}
+
 ROOT          = Path(__file__).resolve().parent.parent
 DASHBOARD_DIR = ROOT / "dashboard"
 DATA_DIR      = ROOT / "data"
@@ -129,6 +142,47 @@ def _parse_situsconcat(situs: str) -> tuple[str, str, str, str]:
         prop_addr = remainder.strip()
         prop_city = ""
     return prop_addr, prop_city, prop_state, prop_zip
+
+def _map_doc_type(raw_type: str) -> tuple[str, str]:
+    """Map a raw doc type string to (cat_code, cat_label)."""
+    t = raw_type.upper().strip()
+    # Direct code match
+    if t in DOC_TYPE_MAP:
+        return t, DOC_TYPE_MAP[t][1]
+    # Keyword matching
+    if "LIS PENDENS" in t and "RELEASE" not in t:
+        return "LP", "Lis Pendens"
+    if "RELEASE" in t and "LIS PENDENS" in t:
+        return "RELLP", "Release Lis Pendens"
+    if "FORECLOSURE" in t:
+        return "NOFC", "Notice of Foreclosure"
+    if "TAX DEED" in t:
+        return "TAXDEED", "Tax Deed"
+    if "IRS" in t or "INTERNAL REVENUE" in t:
+        return "LNIRS", "IRS Lien"
+    if "FEDERAL TAX" in t or "FEDERAL LIEN" in t:
+        return "LNFED", "Federal Lien"
+    if "CORP" in t and ("TAX" in t or "LIEN" in t):
+        return "LNCORPTX", "Corp Tax Lien"
+    if "HOA" in t or "HOMEOWNER" in t or "HOME OWNER" in t:
+        return "LNHOA", "HOA Lien"
+    if "MECHANIC" in t:
+        return "LNMECH", "Mechanic Lien"
+    if "MEDICAID" in t:
+        return "MEDLN", "Medicaid Lien"
+    if "JUDGMENT" in t or "JUDGEMENT" in t:
+        if "CERTIFIED" in t:
+            return "CCJ", "Certified Judgment"
+        if "DOMESTIC" in t:
+            return "DRJUD", "Domestic Judgment"
+        return "JUD", "Judgment"
+    if "PROBATE" in t:
+        return "PRO", "Probate Document"
+    if "NOTICE OF COMMENCEMENT" in t:
+        return "NOC", "Notice of Commencement"
+    if "LIEN" in t:
+        return "LN", "Lien"
+    return t, raw_type
 
 async def screenshot(page: Page, name: str) -> None:
     if not DEBUG:
@@ -300,293 +354,129 @@ def lookup_parcel(owner: str) -> dict:
         if result.get("prop_address") or result.get("mail_address"):
             _parcel_cache[cache_key] = result
             return result
-    result = _socrata_fuzzy(owner.strip().upper())
+    # Fuzzy only for short names — skip for long ones to avoid slow searches
+    if len(owner.split()) <= 3:
+        result = _socrata_fuzzy(owner.strip().upper())
     _parcel_cache[cache_key] = result
     return result
 
 
 # ==============================================================================
 #  CLERK PORTAL
+#
+#  The Neumo portal ignores the searchTerm URL param and returns ALL records.
+#  The date range in the URL is also ignored — it returns all historical records.
+#
+#  Solution: load the search page with any term, then:
+#    1. Click the "2026" year filter in the left sidebar to narrow to 2026
+#    2. Paginate through all pages using button[aria-label="next page"]
+#    3. Filter results client-side to only the last 7 days by recorded date
+#
+#  Confirmed from HTML inspection:
+#    - Next button: button[aria-label="next page"]
+#    - Previous button: button[aria-label="previous page"] (disabled on p1)
+#    - Page buttons: button[aria-label="page N"]
+#    - Year filter: sidebar buttons/links containing the year text
 # ==============================================================================
 
-def build_search_url(date_from: str, date_to: str, term: str) -> str:
+def build_search_url(term: str) -> str:
+    """Build a quicksearch URL with just a search term — no date filter
+    since the portal ignores it anyway."""
     return (
         f"{CLERK_BASE}/results"
         f"?searchType=quickSearch&department=RP&searchOcrText=false"
         f"&searchTerm={term}"
-        f"&recordedDateRange=custom"
-        f"&recordedDateFrom={quote(date_from, safe='')}"
-        f"&recordedDateTo={quote(date_to, safe='')}"
     )
 
-def _extract_from_api(body: Any, doc_type: str = "") -> list[dict]:
-    hits: list = []
-    if isinstance(body, dict):
-        hits = (body.get("hits") or body.get("results") or
-                body.get("records") or body.get("data") or [])
-        if isinstance(hits, dict):
-            hits = hits.get("hits") or hits.get("items") or []
-    elif isinstance(body, list):
-        hits = body
+def _parse_table(html: str, date_from: datetime, date_to: datetime) -> list[dict]:
+    """Parse the results table and filter to our date range."""
+    soup = BeautifulSoup(html, "lxml")
     records = []
-    for hit in hits:
-        if not isinstance(hit, dict):
+    table = soup.find("table")
+    if not table:
+        return records
+
+    headers = [th.get_text(" ", strip=True).lower()
+               for th in table.find_all("th")]
+
+    for tr in table.find_all("tr")[1:]:
+        cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+        if not cells:
             continue
-        src = hit.get("_source") or hit
+        row = dict(zip(headers, cells))
+
         def g(*keys) -> str:
             for k in keys:
-                v = src.get(k)
+                v = row.get(k, "")
                 if v:
-                    return safe_str(v)
+                    return v.strip()
             return ""
-        doc_num   = g("instrumentNumber", "docNumber", "instrument_number", "InstrumentNumber")
-        filed     = g("recordedDate", "filedDate", "recorded_date", "RecordedDate")
-        owner     = g("grantor", "grantors", "owner", "Grantor")
-        grantee   = g("grantee", "grantees", "Grantee")
-        legal     = g("legalDescription", "legal_description", "legal", "Legal")
-        amount    = g("consideration", "amount", "Amount", "Consideration")
-        dtype     = g("documentType", "doc_type", "DocumentType") or doc_type
-        doc_id    = hit.get("id") or hit.get("_id") or hit.get("documentId") or ""
-        clerk_url = f"{CLERK_BASE}/doc/{doc_id}" if doc_id else ""
-        if doc_num or owner:
-            records.append({
-                "doc_num": doc_num, "doc_type": dtype,
-                "filed": _normalise_date(filed), "owner": owner,
-                "grantee": grantee, "legal": legal,
-                "amount": amount, "clerk_url": clerk_url,
-            })
-    return records
 
-def _text_to_row(text: str) -> dict[str, str]:
-    row: dict[str, str] = {}
-    m = re.search(r"(\d{4}-\d{5,}|\d{8,})", text)
-    if m:
-        row["document number"] = m.group(1)
-    m = re.search(r"(\d{1,2}/\d{1,2}/\d{4})", text)
-    if m:
-        row["filed"] = m.group(1)
-    m = re.search(r"\$[\d,]+(?:\.\d{2})?", text)
-    if m:
-        row["amount"] = m.group(0)
-    m = re.search(r"Grantor[:\s]+([^\n|]+)", text, re.I)
-    if m:
-        row["grantor"] = m.group(1).strip()
-    m = re.search(r"Grantee[:\s]+([^\n|]+)", text, re.I)
-    if m:
-        row["grantee"] = m.group(1).strip()
-    return row
+        raw_date = g("recorded date", "recordeddate", "date", "filed")
+        doc_num  = g("doc number", "doc #", "instrument", "document number")
+        owner    = g("grantor", "owner")
+        grantee  = g("grantee")
+        doc_type = g("doc type", "document type", "type")
+        legal    = g("legal description", "legal")
 
-def _row_to_record(row: dict, href: str, doc_type: str = "") -> dict:
-    def g(*keys) -> str:
-        for k in keys:
-            v = (row.get(k, "") or row.get(k.lower(), "") or
-                 row.get(k.upper(), ""))
-            if v:
-                return safe_str(v)
-        return ""
-    return {
-        "doc_num":   g("document number", "doc number", "instrument", "doc #", "doc_num"),
-        "doc_type":  g("document type", "type", "doc type", "documenttype") or doc_type,
-        "filed":     _normalise_date(g("filed", "file date", "recorded", "date filed", "date")),
-        "owner":     g("grantor", "owner", "grantors"),
-        "grantee":   g("grantee", "grantees"),
-        "legal":     g("legal", "legal description", "description", "legaldescription"),
-        "amount":    g("amount", "consideration", "debt", "lien amount"),
-        "clerk_url": href,
-    }
+        # Parse and filter date
+        rec_date = None
+        if raw_date:
+            try:
+                rec_date = datetime.strptime(raw_date, "%m/%d/%Y")
+            except ValueError:
+                pass
 
-async def _parse_neumo_html(page: Page, doc_type: str = "") -> list[dict]:
-    records: list[dict] = []
-    html = await page.content()
-    soup = BeautifulSoup(html, "lxml")
-    table = soup.find("table")
-    if table:
-        headers = [th.get_text(" ", strip=True).lower()
-                   for th in table.find_all("th")]
-        for tr in table.find_all("tr")[1:]:
-            cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
-            if not cells:
-                continue
-            link = tr.find("a", href=True)
-            href = _abs_url(link["href"]) if link else ""
-            records.append(_row_to_record(dict(zip(headers, cells)), href, doc_type))
-        if records:
-            return records
-    for sel in [
-        "[data-testid='result-item']", "[class*='record-card']",
-        "[class*='result-item']",      "[class*='result-card']",
-        "[class*='search-result']",    "li[class*='result']",
-        "div[class*='ResultItem']",    "div[class*='RecordItem']",
-        "div[class*='Hit']",           "article",
-    ]:
-        cards = soup.select(sel)
-        if cards:
-            for card in cards:
-                link = card.find("a", href=True)
-                href = _abs_url(link["href"]) if link else ""
-                row  = _text_to_row(card.get_text(" ", strip=True))
-                rec  = _row_to_record(row, href, doc_type)
-                if not rec["doc_num"] and href:
-                    m = re.search(r"/doc/([^/?#]+)", href)
-                    if m:
-                        rec["doc_num"] = m.group(1)
-                if rec["doc_num"] or rec["owner"]:
-                    records.append(rec)
-            if records:
-                return records
+        # Skip if outside our date range
+        if rec_date and not (date_from <= rec_date <= date_to):
+            continue
+
+        # Skip obviously bad records (1900s, no owner)
+        if rec_date and rec_date.year < 2020:
+            continue
+        if not owner or owner == "N/A":
+            continue
+
+        # Find link
+        link = tr.find("a", href=True)
+        clerk_url = _abs_url(link["href"]) if link else ""
+
+        cat, cat_label = _map_doc_type(doc_type)
+
+        records.append({
+            "doc_num":   doc_num,
+            "doc_type":  doc_type,
+            "filed":     raw_date,
+            "cat":       cat,
+            "cat_label": cat_label,
+            "owner":     owner,
+            "grantee":   grantee,
+            "legal":     legal,
+            "amount":    "",
+            "clerk_url": clerk_url,
+        })
+
     return records
 
 async def _click_next(page: Page) -> bool:
-    """Click the next page button. Tries many selectors."""
-    selectors = [
-        "button[aria-label='Go to next page']",
-        "button[aria-label='Next page']",
-        "button[aria-label='next']",
-        "[data-testid='next-page']",
-        "li.next > a",
-        "a[aria-label='Next']",
-        "button.pagination-next",
-        "[class*='pagination'] button:last-child",
-        "[class*='Pagination'] button:last-child",
-        "[class*='pager'] button:last-child",
-        "button:has-text('>')",
-        "button:has-text('»')",
-        "button:has-text('Next')",
-        "a:has-text('Next')",
-    ]
-    for sel in selectors:
-        try:
-            btn = page.locator(sel).first
-            if await btn.count() > 0:
-                disabled = await btn.get_attribute("disabled")
-                cls = (await btn.get_attribute("class") or "").lower()
-                aria = (await btn.get_attribute("aria-disabled") or "").lower()
-                if (disabled is None and "disabled" not in cls
-                        and aria != "true"):
-                    await btn.click()
-                    await asyncio.sleep(2.5)
-                    return True
-        except Exception:
-            continue
-
-    # Last resort: find all buttons near the bottom of page and click
-    # the one that looks like a right-arrow (SVG chevron)
+    """Click next page button — confirmed selector from HTML inspection."""
     try:
-        # Look for a button containing an SVG with a right-pointing path
-        all_btns = page.locator("nav button, [class*='pagination'] button, [class*='Pagination'] button")
-        count = await all_btns.count()
-        if count > 0:
-            # Try the last button in any pagination container
-            last = all_btns.nth(count - 1)
-            disabled = await last.get_attribute("disabled")
+        btn = page.locator("button[aria-label='next page']").first
+        if await btn.count() > 0:
+            disabled = await btn.get_attribute("disabled")
             if disabled is None:
-                await last.click()
+                await btn.click()
                 await asyncio.sleep(2.5)
                 return True
     except Exception:
         pass
-
     return False
 
-async def scrape_one_page(
-    context: BrowserContext,
-    term: str,
-    date_from: str,
-    date_to: str,
-) -> list[dict]:
-    """Load one search URL, save HTML for inspection, parse and paginate."""
-    page: Page = await context.new_page()
-    records: list[dict] = []
-    api_responses: list[dict] = []
-
-    async def capture(response):
-        ct = response.headers.get("content-type", "")
-        if "json" in ct and any(x in response.url
-                                for x in ["/api/", "/search", "/result", "/record"]):
-            try:
-                api_responses.append(await response.json())
-            except Exception:
-                pass
-
-    page.on("response", capture)
-    try:
-        url = build_search_url(date_from, date_to, term)
-        log.info("  Fetching %s", url)
-        for attempt in range(1, RETRY_ATTEMPTS + 1):
-            try:
-                await page.goto(url, timeout=60_000, wait_until="networkidle")
-                break
-            except Exception as exc:
-                if attempt == RETRY_ATTEMPTS:
-                    raise
-                await asyncio.sleep(RETRY_DELAY)
-
-        await asyncio.sleep(4)
-        title = await page.title()
-        if "Loading" in title:
-            for _ in range(35):
-                await asyncio.sleep(1)
-                title = await page.title()
-                if "Loading" not in title:
-                    break
-
-        log.info("  title: %s | api: %d", title, len(api_responses))
-
-        # Save HTML so we can inspect pagination buttons
-        await save_html(page, f"results_{term}")
-        await screenshot(page, f"results_{term}")
-
-        if "Loading" in title:
-            log.warning("  Still loading — skipping %s", term)
-            return records
-
-        if api_responses:
-            for body in api_responses:
-                records.extend(_extract_from_api(body))
-            if records:
-                page_num = 1
-                for _ in range(50):
-                    api_responses.clear()
-                    if not await _click_next(page):
-                        break
-                    await asyncio.sleep(2.5)
-                    for body in api_responses:
-                        records.extend(_extract_from_api(body))
-                    page_num += 1
-                    log.info("  page %d -> %d records total", page_num, len(records))
-                    if not api_responses:
-                        break
-
-        if not records:
-            records = await _parse_neumo_html(page)
-            page_num = 1
-            for _ in range(50):
-                if not await _click_next(page):
-                    log.info("  no more pages after page %d", page_num)
-                    break
-                await asyncio.sleep(2.5)
-                new = await _parse_neumo_html(page)
-                if not new:
-                    break
-                records.extend(new)
-                page_num += 1
-                log.info("  page %d -> %d records total", page_num, len(records))
-
-        log.info("  -> %d records from %s", len(records), term)
-
-    except Exception as exc:
-        log.error("scrape_one_page(%s): %s", term, exc)
-        await screenshot(page, f"error_{term}")
-    finally:
-        await page.close()
-    return records
-
-async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
+async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list[dict]:
     all_records: list[dict] = []
-
     search_terms = ["RELLP", "JUD", "CCJ", "LNHOA", "NOC", "PRO",
-                    "LN", "LNMECH", "LNIRS", "LNFED", "MEDLN",
-                    "LP", "NOFC", "TAXDEED", "DRJUD", "LNCORPTX"]
+                    "LN", "LNMECH", "LNIRS", "LNFED",
+                    "LP", "NOFC", "TAXDEED"]
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -630,26 +520,101 @@ async def run_clerk_scrape(date_from: str, date_to: str) -> list[dict]:
         finally:
             await warmup.close()
 
+        # Try search terms until one loads
+        page: Page | None = None
+        loaded_term = None
         for term in search_terms:
-            records = await scrape_one_page(context, term, date_from, date_to)
-            if records:
-                all_records = records
-                log.info("Got %d records using term %s", len(all_records), term)
-                break
+            p = await context.new_page()
+            try:
+                url = build_search_url(term)
+                log.info("Trying term %s: %s", term, url)
+                await p.goto(url, timeout=60_000, wait_until="networkidle")
+                await asyncio.sleep(4)
+                title = await p.title()
+                if "Loading" in title:
+                    for _ in range(35):
+                        await asyncio.sleep(1)
+                        title = await p.title()
+                        if "Loading" not in title:
+                            break
+                if "Loading" not in title:
+                    log.info("Loaded with term %s | title: %s", term, title)
+                    page = p
+                    loaded_term = term
+                    break
+                else:
+                    await p.close()
+            except Exception as exc:
+                log.warning("Term %s failed: %s", term, exc)
+                await p.close()
             await asyncio.sleep(2)
+
+        if page is None:
+            log.error("Could not load any search page")
+            await browser.close()
+            return all_records
+
+        try:
+            # Step 1: Click the current year filter in the left sidebar
+            # to narrow results to 2026 only
+            current_year = str(date_to_dt.year)
+            log.info("Clicking year filter: %s", current_year)
+            year_btn = page.locator(
+                f"button:has-text('{current_year}'), "
+                f"a:has-text('{current_year}'), "
+                f"[data-testid*='year']:has-text('{current_year}'), "
+                f"label:has-text('{current_year}'), "
+                f"input[value='{current_year}']"
+            ).first
+            if await year_btn.count() > 0:
+                await year_btn.click()
+                await asyncio.sleep(3)
+                log.info("Year filter clicked")
+                await screenshot(page, "after_year_filter")
+            else:
+                log.warning("Year filter button not found — proceeding without it")
+
+            # Step 2: Save first page HTML for debugging
+            await save_html(page, f"page1_{loaded_term}")
+
+            # Step 3: Paginate through ALL pages, collect records
+            page_num = 1
+            consecutive_empty = 0
+
+            while True:
+                html = await page.content()
+                recs = _parse_table(html, date_from_dt, date_to_dt)
+                log.info("Page %d: %d matching records", page_num, len(recs))
+                all_records.extend(recs)
+
+                # If we got no matching records on this page and records
+                # are dated before our range, we can stop early
+                if recs == [] and page_num > 1:
+                    consecutive_empty += 1
+                    if consecutive_empty >= 3:
+                        log.info("3 consecutive empty pages — stopping pagination")
+                        break
+                else:
+                    consecutive_empty = 0
+
+                if not await _click_next(page):
+                    log.info("No more pages after page %d", page_num)
+                    break
+                page_num += 1
+                log.info("Moving to page %d (total so far: %d)", page_num, len(all_records))
+
+            log.info("Pagination complete: %d total records from %d pages",
+                     len(all_records), page_num)
+
+        except Exception as exc:
+            log.error("Scrape error: %s", exc)
+            await screenshot(page, "error_main")
+        finally:
+            await page.close()
 
         await browser.close()
 
-    for r in all_records:
-        dt = r.get("doc_type", "").upper().strip()
-        if dt in DOC_TYPE_MAP:
-            r["cat"]       = dt
-            r["cat_label"] = DOC_TYPE_MAP[dt][1]
-        else:
-            r["cat"]       = dt
-            r["cat_label"] = dt
-
-    log.info("Total records after tagging: %d", len(all_records))
+    log.info("Raw records collected: %d", len(all_records))
     return all_records
 
 
@@ -718,7 +683,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
 
-            if i % 10 == 0:
+            if i % 20 == 0:
                 log.info("  Parcel lookup %d/%d (cache: %d)",
                          i, total, len(_parcel_cache))
             parcel = lookup_parcel(owner)
@@ -826,17 +791,21 @@ async def main() -> None:
     today = datetime.now()
     start = today - timedelta(days=LOOKBACK_DAYS)
     fmt = "%-m/%-d/%Y" if sys.platform != "win32" else "%#m/%#d/%Y"
-    date_from = start.strftime(fmt)
-    date_to   = today.strftime(fmt)
+    date_from_str = start.strftime(fmt)
+    date_to_str   = today.strftime(fmt)
+
     log.info("=" * 60)
     log.info("Collin County Motivated Seller Scraper")
-    log.info("Range: %s -> %s", date_from, date_to)
+    log.info("Range: %s -> %s", date_from_str, date_to_str)
     log.info("=" * 60)
-    raw_records = await run_clerk_scrape(date_from, date_to)
+
+    raw_records = await run_clerk_scrape(start, today)
     log.info("Raw records from clerk: %d", len(raw_records))
+
     records = assemble_records(raw_records, today)
-    save_output(records, date_from, date_to)
+    save_output(records, date_from_str, date_to_str)
     export_ghl_csv(records)
+
     log.info("Complete. %d records, %d with address.",
              len(records), sum(1 for r in records if r.get("prop_address")))
 
