@@ -3,7 +3,7 @@
 Collin County, Texas — Motivated Seller Lead Scraper
 Clerk portal : https://collin.tx.publicsearch.us/
 Parcel data  : Texas Open Data Socrata ahis-pci3
-Look-back    : last 7 days
+Pull all records for current year
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ logging.basicConfig(
 log = logging.getLogger("collin_scraper")
 
 CLERK_BASE     = "https://collin.tx.publicsearch.us"
-LOOKBACK_DAYS  = 7
+CURRENT_YEAR   = datetime.now().year
 RETRY_ATTEMPTS = 3
 RETRY_DELAY    = 5
 DEBUG          = True
@@ -355,10 +355,15 @@ def build_search_url(term: str) -> str:
         f"&searchTerm={term}"
     )
 
-def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[list[dict], bool]:
+def _parse_table(html: str, current_year: int) -> tuple[list[dict], bool]:
+    """
+    Parse the results table keeping only records from current_year.
+    Returns (records, all_old) where all_old=True means every record
+    on this page is from a prior year — signal to stop paginating.
+    """
     soup = BeautifulSoup(html, "lxml")
     records = []
-    all_too_old = True
+    all_old = True
 
     table = soup.find("table")
     if not table:
@@ -390,18 +395,21 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[lis
         if not raw_date:
             continue
 
-        rec_date = None
+        # Parse year from date
         try:
             rec_date = datetime.strptime(raw_date, "%m/%d/%Y")
         except ValueError:
             continue
 
-        if date_from <= rec_date <= date_to:
-            all_too_old = False
-        elif rec_date > date_to:
+        if rec_date.year < current_year:
+            # Older than current year — skip but mark as old
             continue
-        elif rec_date < date_from:
+        elif rec_date.year > current_year:
+            # Future year — skip
             continue
+        else:
+            # Current year — keep it
+            all_old = False
 
         if not owner or owner == "N/A":
             continue
@@ -423,7 +431,7 @@ def _parse_table(html: str, date_from: datetime, date_to: datetime) -> tuple[lis
             "clerk_url": clerk_url,
         })
 
-    return records, all_too_old
+    return records, all_old
 
 async def _click_next(page: Page) -> bool:
     try:
@@ -438,43 +446,25 @@ async def _click_next(page: Page) -> bool:
         pass
     return False
 
-async def _apply_filters(page: Page, year: str) -> None:
+async def _apply_year_filter(page: Page, year: int) -> None:
+    """Apply the year checkbox filter using JavaScript to bypass hidden input."""
     try:
-        # The checkboxes use CSS custom styling — the actual input is hidden.
-        # Use JavaScript to click the hidden checkbox directly.
         clicked = await page.evaluate(f"""
             (() => {{
                 const cb = document.getElementById('recordedYears_{year}');
-                if (cb) {{
-                    cb.click();
-                    return true;
-                }}
+                if (cb) {{ cb.click(); return true; }}
                 return false;
             }})()
         """)
         if clicked:
             await asyncio.sleep(3)
-            log.info("  Year %s filter applied via JS", year)
+            log.info("  Year %d filter applied", year)
         else:
-            log.warning("  Year %s checkbox not found in DOM", year)
-
-        # Sort by Recorded Date descending — click header twice
-        date_header = page.locator(
-            "th[aria-label='Recorded Date, activate to sort']"
-        ).first
-        if await date_header.count() > 0:
-            await date_header.click(timeout=10000)
-            await asyncio.sleep(2)
-            await date_header.click(timeout=10000)
-            await asyncio.sleep(2)
-            log.info("  Sorted by Recorded Date descending")
-        else:
-            log.warning("  Recorded Date sort header not found")
-
+            log.warning("  Year %d checkbox not found", year)
     except Exception as exc:
-        log.warning("  Filter/sort error: %s", exc)
+        log.warning("  Year filter error: %s", exc)
 
-async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list[dict]:
+async def run_clerk_scrape(current_year: int) -> list[dict]:
     all_records: list[dict] = []
     search_terms = ["RELLP", "JUD", "CCJ", "LNHOA", "NOC", "PRO",
                     "LN", "LNMECH", "LNIRS", "LNFED",
@@ -522,6 +512,7 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
         finally:
             await warmup.close()
 
+        # Load search page
         page: Page | None = None
         loaded_term = None
         for term in search_terms:
@@ -556,36 +547,39 @@ async def run_clerk_scrape(date_from_dt: datetime, date_to_dt: datetime) -> list
             return all_records
 
         try:
-            current_year = str(date_to_dt.year)
-            await _apply_filters(page, current_year)
-            await screenshot(page, "after_filters")
-            await save_html(page, "after_filters")
+            # Apply year filter
+            await _apply_year_filter(page, current_year)
+            await screenshot(page, "after_filter")
+            await save_html(page, "after_filter")
 
+            # Paginate through all pages
             page_num = 1
-            consecutive_too_old = 0
-            max_pages = 200
+            consecutive_old = 0
+            max_pages = 2000
 
             while page_num <= max_pages:
                 html = await page.content()
-                recs, all_too_old = _parse_table(html, date_from_dt, date_to_dt)
-                log.info("Page %d: %d matching records (all_too_old=%s)",
-                         page_num, len(recs), all_too_old)
+                recs, all_old = _parse_table(html, current_year)
+                log.info("Page %d: %d records (all_old=%s) | total so far: %d",
+                         page_num, len(recs), all_old, len(all_records))
                 all_records.extend(recs)
 
-                if all_too_old and page_num > 1:
-                    consecutive_too_old += 1
-                    if consecutive_too_old >= 2:
-                        log.info("Records too old — stopping at page %d", page_num)
+                if all_old and page_num > 2:
+                    consecutive_old += 1
+                    if consecutive_old >= 3:
+                        log.info("3 consecutive old pages — stopping at page %d",
+                                 page_num)
                         break
                 else:
-                    consecutive_too_old = 0
+                    consecutive_old = 0
 
                 if not await _click_next(page):
                     log.info("No more pages after page %d", page_num)
                     break
                 page_num += 1
 
-            log.info("Done: %d records from %d pages", len(all_records), page_num)
+            log.info("Pagination done: %d records from %d pages",
+                     len(all_records), page_num)
 
         except Exception as exc:
             log.error("Scrape error: %s", exc)
@@ -664,7 +658,7 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
             amount_str = safe_str(raw.get("amount", ""))
             amount_raw = parse_amount(amount_str)
 
-            if i % 20 == 0:
+            if i % 100 == 0:
                 log.info("  Parcel lookup %d/%d (cache: %d)",
                          i, total, len(_parcel_cache))
             parcel = lookup_parcel(owner)
@@ -704,11 +698,11 @@ def assemble_records(raw_records: list[dict], today: datetime) -> list[dict]:
     return assembled
 
 
-def save_output(records: list[dict], date_from: str, date_to: str) -> None:
+def save_output(records: list[dict], current_year: int) -> None:
     payload = {
         "fetched_at":   datetime.now(timezone.utc).isoformat(),
         "source":       "Collin County Clerk / Collin CAD",
-        "date_range":   {"from": date_from, "to": date_to},
+        "date_range":   {"from": f"1/1/{current_year}", "to": "present"},
         "total":        len(records),
         "with_address": sum(1 for r in records if r.get("prop_address")),
         "records":      records,
@@ -770,21 +764,18 @@ def export_ghl_csv(records: list[dict]) -> None:
 
 async def main() -> None:
     today = datetime.now()
-    start = today - timedelta(days=LOOKBACK_DAYS)
-    fmt = "%-m/%-d/%Y" if sys.platform != "win32" else "%#m/%#d/%Y"
-    date_from_str = start.strftime(fmt)
-    date_to_str   = today.strftime(fmt)
+    current_year = today.year
 
     log.info("=" * 60)
     log.info("Collin County Motivated Seller Scraper")
-    log.info("Range: %s -> %s", date_from_str, date_to_str)
+    log.info("Pulling all records for year: %d", current_year)
     log.info("=" * 60)
 
-    raw_records = await run_clerk_scrape(start, today)
+    raw_records = await run_clerk_scrape(current_year)
     log.info("Raw records from clerk: %d", len(raw_records))
 
     records = assemble_records(raw_records, today)
-    save_output(records, date_from_str, date_to_str)
+    save_output(records, current_year)
     export_ghl_csv(records)
 
     log.info("Complete. %d records, %d with address.",
